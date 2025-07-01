@@ -61,13 +61,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Login to Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: gcr.io
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-
       - name: Build and Push Images to Quarantine
         run: |
           REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
@@ -94,9 +87,9 @@ jobs:
                           -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG" \
                           "$SERVICE"
               
-              # Push images to Google Artifact Registry in Quarantine Project
-              docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG"
-              docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG"
+              # # Push images to Google Artifact Registry in Quarantine Project
+              # docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG"
+              # docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG"
               
               echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project"
             else
