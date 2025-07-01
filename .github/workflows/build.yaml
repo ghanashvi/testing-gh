@@ -18,37 +18,40 @@ jobs:
           cd $REPO_NAME
           git checkout ${{ github.event.client_payload.sha }}
 
-      - name: Detect Changed Components
+      - name: Simple Detect Changed Components
         id: detect-changes
         run: |
           cd $REPO_NAME
-          # Check if this is the first commit
-          if git rev-parse HEAD~1 &>/dev/null; then
-            # Normal flow - previous commit exists
-            PREVIOUS_COMMIT=$(git rev-parse HEAD~1)
-            
-            # Find which directories with Dockerfiles have changed
-            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile" ]; then echo {}; fi')
-            
-            # Find which directories with service files have changed
-            SERVICE_FILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -E '\.(yaml|yml|json)$' | grep -E 'service|deployment|config' | grep -o '^[^/]*/[^/]*' | sort | uniq)
-          else
-            # First-time run - consider all Dockerfiles
-            echo "First-time run detected - processing all components"
-            DOCKERFILE_CHANGES=$(find . -name "Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
-            
-            # Simplified find command with proper quoting
-            SERVICE_FILE_CHANGES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) | grep -E 'service|deployment|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
-          fi
           
-          # Combine the changes with proper newline handling
-          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\n' | sort | uniq | grep -v '^$')
+          # Extremely simplified version - just look for any Dockerfiles
+          echo "Looking for Dockerfiles..."
+          DOCKERFILES=$(find . -name "Dockerfile" | sort)
+          echo "Found Dockerfiles:"
+          echo "$DOCKERFILES"
           
-          # Output the changed services
-          echo "Changed services and configs: $ALL_CHANGES"
-          echo "changed_services<<EOF" >> $GITHUB_OUTPUT
-          echo "$ALL_CHANGES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Get the directories of these Dockerfiles
+          DOCKER_DIRS=""
+          for df in $DOCKERFILES; do
+            dir=$(dirname "$df")
+            # Get parent/child format if possible
+            if [[ "$dir" == *"/"* ]]; then
+              parent_child=$(echo "$dir" | sed -E 's|^\./([^/]+/[^/]+).*|\1|')
+              DOCKER_DIRS="$DOCKER_DIRS $parent_child"
+            fi
+          done
+          
+          # Clean up the list
+          DOCKER_DIRS=$(echo "$DOCKER_DIRS" | tr ' ' '\n' | sort | uniq | grep -v "^\s*$" || echo "")
+          
+          echo "Docker directories:"
+          echo "$DOCKER_DIRS"
+          
+          # Write to output
+          {
+            echo "changed_services<<EOF"
+            echo "$DOCKER_DIRS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -60,32 +63,45 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Build and Push Images to Quarantine
+      - name: Build and Push Images
         run: |
           REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
           
-          # Debug: Show the changed services
+          # Debug output
           echo "Changed services from previous step:"
           echo "${{ steps.detect-changes.outputs.changed_services }}"
           
-          # Loop through each identified service and build/push its Docker image
-          for SERVICE in ${{ steps.detect-changes.outputs.changed_services }}; do
-            if [ -f "$SERVICE/Dockerfile" ]; then
-              echo "Building $SERVICE..."
-              
-              SERVICE_NAME=$(echo $SERVICE | cut -d'/' -f2)
-              COMMIT_TAG="${{ github.event.client_payload.sha }}"
-              FEATURE_TAG=$(echo ${{ github.event.client_payload.ref }} | sed 's/refs\/heads\///')
-              
-              # Build image with tags
-              docker build -t gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG \
-                          -t gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG \
-                          "$SERVICE"
-              
-              # Push images to Google Artifact Registry in Quarantine Project
-              docker push gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG
-              docker push gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG
-              
-              echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project"
+          # Only proceed if we have changed services
+          if [ -z "${{ steps.detect-changes.outputs.changed_services }}" ]; then
+            echo "No services to build. Exiting."
+            exit 0
+          fi
+          
+          # Loop through each service
+          echo "${{ steps.detect-changes.outputs.changed_services }}" | while read SERVICE; do
+            if [ -z "$SERVICE" ]; then
+              continue
             fi
+            
+            echo "Building $SERVICE..."
+            
+            if [ ! -f "$SERVICE/Dockerfile" ]; then
+              echo "Warning: $SERVICE/Dockerfile not found. Skipping."
+              continue
+            fi
+            
+            SERVICE_NAME=$(echo "$SERVICE" | cut -d'/' -f2)
+            COMMIT_TAG="${{ github.event.client_payload.sha }}"
+            FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
+            
+            # Build image
+            docker build -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG" \
+                        -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG" \
+                        "$SERVICE"
+            
+            # Push images
+            docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG"
+            docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG"
+            
+            echo "Successfully built and pushed $SERVICE_NAME"
           done
