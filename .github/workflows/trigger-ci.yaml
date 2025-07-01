@@ -1,0 +1,21 @@
+name: CI/CD Pipeline Trigger
+
+on:
+  repository_dispatch:
+    types: [app-code-change]
+
+jobs:
+  trigger-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Build Workflow
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.CI_PAT }}
+          repository: ${{ github.repository }}
+          event-type: start-build-process
+          client-payload: '{
+            \repository": "${{ github.event.client_payload.repository }}",
+            "commit": "${{ github.event.client_payload.commit }}",
+            \ref": "${{ github.event.client_payload.ref }}"
+          }'
