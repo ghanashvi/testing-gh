@@ -1,55 +1,85 @@
-# File: .github/workflows/ci-orchestration.yml
-
-name: CI Orchestration Pipeline
+name: Build Process
 
 on:
   repository_dispatch:
     types: [app-code-change]
 
 jobs:
-  detect-and-build:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout CI Orchestration Repository
+      - name: Checkout CI Orchestration Repo
         uses: actions/checkout@v3
-      
-      - name: Clone Application Repository
+
+      - name: Clone Source Repository
         run: |
-          REPO="${{ github.event.client_payload.repository }}"
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/$REPO.git app-repo
-          cd app-repo
-          git checkout ${{ github.event.client_payload.sha }}
-      
-      - name: Detect Changed Services
-        id: detect-services
+          REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git $REPO_NAME
+          cd $REPO_NAME
+          git checkout ${{ github.event.client_payload.commit }}
+
+      - name: Detect Changed Components
+        id: detect-changes
         run: |
-          cd app-repo
-          git fetch --prune --unshallow
-          PREV_COMMIT=$(git rev-parse HEAD^)
-          CHANGED_FILES=$(git diff --name-only $PREV_COMMIT HEAD)
+          cd $REPO_NAME
+          # Check if this is the first commit
+          if git rev-parse HEAD~1 &>/dev/null; then
+            # Normal flow - previous commit exists
+            PREVIOUS_COMMIT=$(git rev-parse HEAD~1)
+            
+            # Find which directories with Dockerfiles have changed
+            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile" ]; then echo {}; fi')
+            
+            # Find which directories with service files have changed
+            SERVICE_FILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -E '\.(yaml|yml|json)$' | grep -i 'service|deployment|config' | grep -o '^[^/]*/[^/]*' | sort | uniq)
+          else
+            # First-time run - consider all Dockerfiles
+            echo \First-time run detected - processing all components"
+            DOCKERFILE_CHANGES=$(find . -name \Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
+            SERVICE_FILE_CHANGES=$(find . -name "*.yaml" -o -name "*.yml" -o -name "*.json\ | grep -i 'service\|deployment\|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
+          fi
           
-          AFFECTED_SERVICES=""
-          for FILE in $CHANGED_FILES; do
-            if [[ $FILE == services/* ]]; then
-              SERVICE=$(echo $FILE | cut -d/ -f2)
-              AFFECTED_SERVICES="$AFFECTED_SERVICES $SERVICE"
-            elif [[ $FILE == */Dockerfile ]]; then
-              SERVICE=$(dirname $FILE | xargs basename)
-              AFFECTED_SERVICES="$AFFECTED_SERVICES $SERVICE"
-            elif [[ $FILE == */docker-compose* ]]; then
-              SERVICE=$(dirname $FILE | xargs basename)
-              AFFECTED_SERVICES="$AFFECTED_SERVICES $SERVICE"
+          # Combine the changes
+          ALL_CHANGES=$(echo \$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\
+' | sort | uniq)
+          
+          # Output the changed services
+          echo "Changed services and configs: $ALL_CHANGES"
+          echo "changed_services=$ALL_CHANGES\ >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: gcr.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and Push Images to Quarantine
+        run: |
+          REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
+          
+          # Loop through each identified service and build/push its Docker image
+          for SERVICE in ${{ steps.detect-changes.outputs.changed_services }}; do
+            if [ -f \$SERVICE/Dockerfile\]; then
+              echo "Building $SERVICE..."
+              
+              SERVICE_NAME=$(echo $SERVICE | cut -d'/' -f2)
+              COMMIT_TAG="${{ github.event.client_payload.commit }}"
+              FEATURE_TAG=$(echo ${{ github.event.client_payload.ref }} | sed 's/refs\\/heads\///')
+              
+              # Build image with tags
+              docker build -t gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG \
+                          -t gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG \
+                          $SERVICE
+              
+              # Push images to Google Artifact Registry in Quarantine Project
+              docker push gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG
+              docker push gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG
+              
+              echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project\
             fi
           done
-          
-          AFFECTED_SERVICES=$(echo $AFFECTED_SERVICES | tr ' ' '\n' | sort | uniq | tr '\n' ' ')
-          echo "AFFECTED_SERVICES=$AFFECTED_SERVICES" >> $GITHUB_ENV
-          echo "services=$AFFECTED_SERVICES" >> $GITHUB_OUTPUT
-      
-      - name: Build Decision
-        run: |
-          if [[ -z "${{ env.AFFECTED_SERVICES }}" ]]; then
-            echo "SHOULD_BUILD=false" >> $GITHUB_ENV
-          else
-            echo "SHOULD_BUILD=true" >> $GITHUB_ENV
-          fi
+
