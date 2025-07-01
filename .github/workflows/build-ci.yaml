@@ -1,3 +1,68 @@
+# name: Build Process
+
+# on:
+#   repository_dispatch:
+#     types: [app-code-change]
+
+# jobs:
+#   build:
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: 'read'
+#       id-token: 'write'
+
+#     steps:
+#       - name: Checkout CI Orchestration Repo
+#         uses: actions/checkout@v3
+
+#       - name: Clone Source Repository
+#         run: |
+#           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+#           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
+#           cd "$REPO_NAME"
+#           git checkout "${{ github.event.client_payload.sha }}"
+
+#       - name: Authenticate to Google Cloud
+#         uses: google-github-actions/auth@v1
+#         with:
+#           workload_identity_provider: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+#           service_account: 'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v2
+
+#       - name: Setup gcloud CLI
+#         uses: google-github-actions/setup-gcloud@v1
+
+#       - name: Configure Docker for Artifact Registry
+#         run: |
+#           gcloud auth configure-docker us-central1-docker.pkg.dev
+
+#       - name: Build and Push Image
+#         run: |
+#           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+#           COMMIT_TAG="${{ github.event.client_payload.sha }}"
+#           FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
+          
+#           # Simplified approach - we know there's a Dockerfile in the repo root
+#           if [ -f "$REPO_NAME/Dockerfile" ]; then
+#             echo "Building Docker image for $REPO_NAME..."
+            
+#             # Build image with tags - using the correct Artifact Registry path
+#             docker build -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG" \
+#                          -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG" \
+#                          "$REPO_NAME"
+            
+#             # Push images to Google Artifact Registry
+#             docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG"
+#             docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG"
+            
+#             echo "Successfully built and pushed $REPO_NAME to Quarantine Repository"
+#           else
+#             echo "Error: Dockerfile not found in repository root. Aborting."
+#             exit 1
+#           fi
+
 name: Build Process
 
 on:
@@ -22,6 +87,38 @@ jobs:
           cd "$REPO_NAME"
           git checkout "${{ github.event.client_payload.sha }}"
 
+      - name: Detect Changed Files
+        id: detect-changes
+        run: |
+          REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+          cd "$REPO_NAME"
+
+          # Get previous commit hash
+          PREVIOUS_COMMIT=$(git rev-parse HEAD^)
+
+          # Find all directories containing Dockerfiles that were modified
+          CHANGED_DOCKER_DIRS=$(git diff --name-only "$PREVIOUS_COMMIT" "${{ github.event.client_payload.sha }}" | grep -E '(^|/)Dockerfile$|Dockerfile\.' | xargs -I{} dirname {} | sort -u)
+
+          # If no Dockerfile was changed, check if any file was changed in directories containing Dockerfiles
+          if [ -z "$CHANGED_DOCKER_DIRS" ]; then
+            # Find all directories with Dockerfiles
+            DOCKER_DIRS=$(find . -name "Dockerfile" -o -name "Dockerfile.*" | xargs -I{} dirname {} | sort -u)
+
+            # Check if any files in these directories were changed
+            for DIR in $DOCKER_DIRS; do
+              CHANGED_FILES=$(git diff --name-only "$PREVIOUS_COMMIT" "${{ github.event.client_payload.sha }}" -- "$DIR")
+              if [ -n "$CHANGED_FILES" ]; then
+                CHANGED_DOCKER_DIRS="$CHANGED_DOCKER_DIRS $DIR"
+              fi
+            done
+          fi
+
+          # Export the list of changed dirs for later use
+          echo "CHANGED_DOCKER_DIRS=$(echo $CHANGED_DOCKER_DIRS)" >> $GITHUB_ENV
+
+          # Output for debugging
+          echo "Changed Docker directories: $CHANGED_DOCKER_DIRS"
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
         with:
@@ -38,27 +135,43 @@ jobs:
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev
 
-      - name: Build and Push Image
+      - name: Build and Push Changed Images
         run: |
+          # Retrieve the list of changed Docker directories
+          CHANGED_DOCKER_DIRS="${{ steps.detect-changes.outputs.CHANGED_DOCKER_DIRS }}"
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           COMMIT_TAG="${{ github.event.client_payload.sha }}"
           FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
-          
-          # Simplified approach - we know there's a Dockerfile in the repo root
-          if [ -f "$REPO_NAME/Dockerfile" ]; then
-            echo "Building Docker image for $REPO_NAME..."
-            
-            # Build image with tags - using the correct Artifact Registry path
-            docker build -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG" \
-                         -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG" \
-                         "$REPO_NAME"
-            
-            # Push images to Google Artifact Registry
-            docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG"
-            docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG"
-            
-            echo "Successfully built and pushed $REPO_NAME to Quarantine Repository"
-          else
-            echo "Error: Dockerfile not found in repository root. Aborting."
-            exit 1
+
+          # Check if there are any changed Docker directories
+          if [ -z "$CHANGED_DOCKER_DIRS" ]; then
+            echo "No Dockerfile changes detected. Skipping build."
+            exit 0
           fi
+
+          # Process each changed directory
+          for DIR in $CHANGED_DOCKER_DIRS; do
+            # Extract component name from directory path (last segment)
+            COMPONENT=$(basename "$DIR")
+
+            # Find Dockerfile in the directory
+            DOCKERFILE=$(find "$DIR" -maxdepth 1 -name "Dockerfile" -o -name "Dockerfile.*" | head -n 1)
+
+            if [ -n "$DOCKERFILE" ]; then
+              echo "Building Docker image for component: $COMPONENT..."
+  
+              # Build image with tags
+              docker build -f "$DOCKERFILE" \
+                           -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
+                           -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG" \
+                           "$DIR"
+
+              # Push images to Google Artifact Registry
+              docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+              docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG"
+              
+              echo "Successfully built and pushed $REPO_NAME-$COMPONENT to Quarantine Repository"
+            else
+              echo "Warning: No Dockerfile found in $DIR. Skipping build."
+            fi
+          done
