@@ -83,9 +83,9 @@ jobs:
               FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
               
               # Build image with tags
-              docker build -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG\ \
-                          -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG" \
-                          \$SERVICE"
+              docker build -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG" \
+              -t "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$FEATURE_TAG" \
+              \$SERVICE"
               
               # Push images to Google Artifact Registry in Quarantine Project
               # docker push "gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG"
