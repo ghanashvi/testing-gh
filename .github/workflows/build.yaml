@@ -93,5 +93,3 @@ jobs:
               echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project"
             fi
           done
-
-    
