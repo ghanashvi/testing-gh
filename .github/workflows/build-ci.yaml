@@ -41,24 +41,15 @@ jobs:
       - name: Build and Push Image
         run: |
           REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
-          COMMIT_TAG=\${{ github.event.client_payload.sha }}"
-          FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
+          COMMIT_TAG="${{ github.event.client_payload.sha }}\FEATURE_TAG=$(echo \${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
           
-          # Simplified approach - we know there's a Dockerfile in the repo root
-          if [ -f "$REPO_NAME/Dockerfile" ]; then
-            echo "Building Docker image for $REPO_NAME..."
-            
-            # Build image with tags - using the correct Artifact Registry path
-            docker build -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG" \\
-                        -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG" \\
-                        \$REPO_NAME"
-            
-            # Push images to Google Artifact Registry
-            docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$COMMIT_TAG\"
+          # Simplified approach - check for Dockerfile in repo root
+          if [ -f \$REPO_NAME/Dockerfile" ]; then
+            echo "Building Docker image for $REPO_NAME...\
+            # Build image with tags - using the correct
             docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME:insecure-$FEATURE_TAG"
             
-            echo "Successfully built and pushed $REPO_NAME to Quarantine Repository"
-          else
-            echo "Error: Dockerfile not found in repository root. Aborting.\"
+            echo "Successfully built and pushed $REPO_NAME to Quarantine Repository\else
+            echo "Error: Dockerfile not found in repository root. Aborting."
             exit 1
           fi
