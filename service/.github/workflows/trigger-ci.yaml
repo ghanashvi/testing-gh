@@ -15,7 +15,7 @@ jobs:
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.CI_PAT }}
-          repository: your-org/ci-orchestration-repo
+          repository: ghanashvi/testing-gh
           event-type: app-code-change
           client-payload: '{
             "repository": "${{ github.repository }}",
