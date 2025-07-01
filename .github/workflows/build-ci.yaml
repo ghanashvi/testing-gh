@@ -15,7 +15,7 @@ jobs:
       - name: Checkout CI Orchestration Repo
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Fetch full history necessary for detecting changes
+          fetch-depth: 2  # Fetch only the last two commits for accurate comparison
 
       - name: Clone Source Repository
         run: |
@@ -28,34 +28,31 @@ jobs:
         id: detect-changes
         run: |
           cd "$REPO_NAME"
-
-          # Ensure full history is fetched for accurate comparisons
-          git fetch --all
-
-          # Get previous commit hash from the current commit
+          
+          # Use current commit SHA from event payload
+          CURRENT_SHA="${{ github.event.client_payload.sha }}"
+          # Use the previous commit for change detection
           PREVIOUS_COMMIT=$(git rev-parse HEAD^)
 
-          # Find all directories containing Dockerfiles that were modified
-          CHANGED_DOCKER_DIRS=$(git diff --name-only "$PREVIOUS_COMMIT" "${{ github.event.client_payload.sha }}" | grep -E '(^|/)Dockerfile($|.?)' | xargs -I{} dirname {} | sort -u)
+          # Find directories with Dockerfiles that had changes
+          CHANGED_DOCKER_DIRS=$(git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_SHA" | grep -E '(^|/)Dockerfile(\.|$)' | xargs -I{} dirname {} | sort -u)
 
-          # If no Dockerfile was changed, check if any file was changed in directories containing Dockerfiles
+          # If no Dockerfiles were directly changed, see if changes exist in their directories
           if [ -z "$CHANGED_DOCKER_DIRS" ]; then
-            # Find all directories with Dockerfiles
+            # Find all directories containing Dockerfiles
             DOCKER_DIRS=$(find . -name "Dockerfile" -o -name "Dockerfile.*" | xargs -I{} dirname {} | sort -u)
 
-            # Check if any files in these directories were changed
+            # Check for changes in these directories
             for DIR in $DOCKER_DIRS; do
-              CHANGES=$(git diff --name-only "$PREVIOUS_COMMIT" "${{ github.event.client_payload.sha }}" -- "$DIR")
+              CHANGES=$(git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_SHA" -- "$DIR")
               if [ -n "$CHANGES" ]; then
                 CHANGED_DOCKER_DIRS="$CHANGED_DOCKER_DIRS $DIR"
               fi
             done
           fi
 
-          # Export the list of changed dirs for later use
+          # Export list of changed directories
           echo "CHANGED_DOCKER_DIRS=$(echo $CHANGED_DOCKER_DIRS)" >> $GITHUB_ENV
-
-          # Output for debugging
           echo "Changed Docker directories: $CHANGED_DOCKER_DIRS"
 
       - name: Authenticate to Google Cloud
@@ -90,16 +87,16 @@ jobs:
 
           # Process each changed directory
           for DIR in $CHANGED_DOCKER_DIRS; do
-            # Extract component name from directory path (last segment)
+            # Extract component name based on directory structure
             COMPONENT=$(basename "$DIR")
 
-            # Find Dockerfile in the directory
+            # Locate Dockerfile in the directory
             DOCKERFILE=$(find "$DIR" -maxdepth 1 -name "Dockerfile" -o -name "Dockerfile.*" | head -n 1)
 
             if [ -n "$DOCKERFILE" ]; then
               echo "Building Docker image for component: $COMPONENT..."
-  
-              # Build image with tags
+
+              # Build the image using appropriate tags
               docker build -f "$DOCKERFILE" \
                            -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
                            -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG" \
@@ -108,7 +105,7 @@ jobs:
               # Push images to Google Artifact Registry
               docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
               docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG"
-              
+
               echo "Successfully built and pushed $REPO_NAME-$COMPONENT to Quarantine Repository"
             else
               echo "Warning: No Dockerfile found in $DIR. Skipping build."
