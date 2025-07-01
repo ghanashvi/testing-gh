@@ -34,7 +34,7 @@ jobs:
             SERVICE_FILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -E '\.(yaml|yml|json)$' | grep -E 'service|deployment|config' | grep -o '^[^/]*/[^/]*' | sort | uniq)
           else
             # First-time run - consider all Dockerfiles
-            echo "First-time run detected - processing all components"
+            echo \First-time run detected - processing all components\
             DOCKERFILE_CHANGES=$(find . -name "Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
             
             # Simplified find command with proper quoting
@@ -42,10 +42,10 @@ jobs:
           fi
           
           # Combine the changes with proper newline handling
-          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\n' | sort | uniq | grep -v '^$')
+          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '' | sort | uniq | grep -v '^$')
           
           # Output the changed services
-          echo "Changed services and configs: $ALL_CHANGES"
+          echo "Changed services and configs: $ALL_CHANGES\
           echo "changed_services<<EOF" >> $GITHUB_OUTPUT
           echo "$ALL_CHANGES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -85,3 +85,17 @@ jobs:
               echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project"
             fi
           done
+
+      - name: Trigger Security Scanning
+        if: success()
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.CI_PAT }}
+          repository: ${{ github.repository }}
+          event-type: start-security-scanning
+          client-payload: '{
+            "repository": "${{ github.event.client_payload.repository }}",
+            "sha": \${{ github.event.client_payload.sha }}",
+            "ref": "${{ github.event.client_payload.ref }}",
+            "changed_services": "${{ steps.detect-changes.outputs.changed_services }}"
+          }'
