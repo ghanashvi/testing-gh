@@ -40,8 +40,7 @@ jobs:
           fi
           
           # Combine the changes
-          ALL_CHANGES=$(echo \$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\
-' | sort | uniq)
+          ALL_CHANGES=$(echo \$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\' | sort | uniq)
           
           # Output the changed services
           echo "Changed services and configs: $ALL_CHANGES"
