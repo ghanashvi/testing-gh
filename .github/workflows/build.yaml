@@ -16,7 +16,7 @@ jobs:
           REPO_NAME=$(echo ${{ github.event.client_payload.repository }} | cut -d'/' -f2)
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git $REPO_NAME
           cd $REPO_NAME
-          git checkout ${{ github.event.client_payload.commit }}
+          git checkout ${{ github.event.client_payload.sha }}
 
       - name: Detect Changed Components
         id: detect-changes
@@ -28,21 +28,21 @@ jobs:
             PREVIOUS_COMMIT=$(git rev-parse HEAD~1)
             
             # Find which directories with Dockerfiles have changed
-            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile\ ]; then echo {}; fi')
+            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile" ]; then echo {}; fi')
             
             # Find which directories with service files have changed - improved pattern matching
             SERVICE_FILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -E '\.(yaml|yml|json)$' | grep -E 'service|deployment|config' | grep -o '^[^/]*/[^/]*' | sort | uniq)
           else
             # First-time run - consider all Dockerfiles
-            echo "First-time run detected - processing all components\
+            echo "First-time run detected - processing all components"
             DOCKERFILE_CHANGES=$(find . -name "Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
             
             # Simplified find command with proper quoting
-            SERVICE_FILE_CHANGES=$(find . -type f \( -name \*.yaml" -o -name "*.yml" -o -name "*.json" \) | grep -E 'service|deployment|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
+            SERVICE_FILE_CHANGES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) | grep -E 'service|deployment|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
           fi
           
           # Combine the changes with proper newline handling
-          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\' | sort | uniq | grep -v '^$')
+          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\n' | sort | uniq | grep -v '^$')
           
           # Output the changed services
           echo "Changed services and configs: $ALL_CHANGES"
@@ -66,11 +66,11 @@ jobs:
           
           # Loop through each identified service and build/push its Docker image
           for SERVICE in ${{ steps.detect-changes.outputs.changed_services }}; do
-            if [ -f "$SERVICE/Dockerfile\]; then
+            if [ -f "$SERVICE/Dockerfile" ]; then
               echo "Building $SERVICE..."
               
               SERVICE_NAME=$(echo $SERVICE | cut -d'/' -f2)
-              COMMIT_TAG="${{ github.event.client_payload.commit }}"
+              COMMIT_TAG="${{ github.event.client_payload.sha }}"
               FEATURE_TAG=$(echo ${{ github.event.client_payload.ref }} | sed 's/refs\/heads\///')
               
               # Build image with tags
