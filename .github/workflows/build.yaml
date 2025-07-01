@@ -28,24 +28,24 @@ jobs:
             PREVIOUS_COMMIT=$(git rev-parse HEAD~1)
             
             # Find which directories with Dockerfiles have changed
-            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile" ]; then echo {}; fi')
+            DOCKERFILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -o '^[^/]*/[^/]*' | sort | uniq | xargs -I{} bash -c 'if [ -f "{}/Dockerfile\ ]; then echo {}; fi')
             
-            # Find which directories with service files have changed - improved pattern matching
+            # Find which directories with service files have changed
             SERVICE_FILE_CHANGES=$(git diff --name-only $PREVIOUS_COMMIT HEAD | grep -E '\.(yaml|yml|json)$' | grep -E 'service|deployment|config' | grep -o '^[^/]*/[^/]*' | sort | uniq)
           else
             # First-time run - consider all Dockerfiles
-            echo \First-time run detected - processing all components\
-            DOCKERFILE_CHANGES=$(find . -name "Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
+            echo "First-time run detected - processing all components\
+            DOCKERFILE_CHANGES=$(find . -name "Dockerfile" | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
             
             # Simplified find command with proper quoting
-            SERVICE_FILE_CHANGES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json" \) | grep -E 'service|deployment|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//g' | sort | uniq)
+            SERVICE_FILE_CHANGES=$(find . -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.json\\) | grep -E 'service|deployment|config' | grep -o '^\./[^/]*/[^/]*' | sed 's/^\.//' | sort | uniq)
           fi
           
           # Combine the changes with proper newline handling
-          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '' | sort | uniq | grep -v '^$')
+          ALL_CHANGES=$(echo "$DOCKERFILE_CHANGES $SERVICE_FILE_CHANGES" | tr ' ' '\' | sort | uniq | grep -v '^$')
           
           # Output the changed services
-          echo "Changed services and configs: $ALL_CHANGES\
+          echo \Changed services and configs: $ALL_CHANGES"
           echo "changed_services<<EOF" >> $GITHUB_OUTPUT
           echo "$ALL_CHANGES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -66,12 +66,12 @@ jobs:
           
           # Loop through each identified service and build/push its Docker image
           for SERVICE in ${{ steps.detect-changes.outputs.changed_services }}; do
-            if [ -f "$SERVICE/Dockerfile" ]; then
+            if [ -f \$SERVICE/Dockerfile" ]; then
               echo "Building $SERVICE..."
               
               SERVICE_NAME=$(echo $SERVICE | cut -d'/' -f2)
               COMMIT_TAG="${{ github.event.client_payload.sha }}"
-              FEATURE_TAG=$(echo ${{ github.event.client_payload.ref }} | sed 's/refs\/heads\///')
+              FEATURE_TAG=$(echo ${{ github.event.client_payload.ref }} | sed 's/refs\\/heads\///')
               
               # Build image with tags
               docker build -t gcr.io/quarantine-project/$REPO_NAME/$SERVICE_NAME:$COMMIT_TAG \
@@ -85,17 +85,3 @@ jobs:
               echo "Successfully built and pushed $SERVICE_NAME to Quarantine Project"
             fi
           done
-
-      - name: Trigger Security Scanning
-        if: success()
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.CI_PAT }}
-          repository: ${{ github.repository }}
-          event-type: start-security-scanning
-          client-payload: '{
-            "repository": "${{ github.event.client_payload.repository }}",
-            "sha": \${{ github.event.client_payload.sha }}",
-            "ref": "${{ github.event.client_payload.ref }}",
-            "changed_services": "${{ steps.detect-changes.outputs.changed_services }}"
-          }'
