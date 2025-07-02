@@ -337,7 +337,7 @@ jobs:
             fi
 
             docker build -f "$DOCKERFILE" \
-              -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" 
+              -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"\
               .
 
             docker push "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
