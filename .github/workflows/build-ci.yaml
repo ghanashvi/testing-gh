@@ -17,9 +17,9 @@ jobs:
 
       - name: Clone Source Repository
         run: |
-          REPO_NAME=$(echo \${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          git clone \https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git\ "$REPO_NAME"
-          cd "$REPO_NAME\
+          REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
+          cd "$REPO_NAME"
           git checkout "${{ github.event.client_payload.sha }}"
 
       - name: Detect Changed Files
