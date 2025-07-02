@@ -60,10 +60,8 @@ jobs:
             CHANGED_DIRS="$CHANGED_DIRS ."
           fi
 
-          # Export changed directories
-          CHANGED_DIRS=$(echo "$CHANGED_DIRS" | xargs -n1 | sort -u)
-          echo "DOCKER_DIRS_CSV=$(echo $CHANGED_DIRS | tr ' ' ',')" >> $GITHUB_ENV
-          echo "Changed Docker directories: $CHANGED_DIRS"
+          echo "Detected changed directories: $CHANGED_DIRS"
+          echo "DOCKER_DIRS_CSV=$(echo $CHANGED_DIRS | xargs | tr ' ' ',')" >> $GITHUB_ENV
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
@@ -98,21 +96,41 @@ jobs:
             COMPONENT=$(basename "$DIR")
             [ "$DIR" = "." ] && COMPONENT="$REPO_NAME"
 
-            echo "Building $COMPONENT from $DIR"
+            CD_PATH="$REPO_NAME/$DIR"
+            echo "Building $COMPONENT from $CD_PATH"
 
-            DOCKERFILE=$(find "$DIR" -maxdepth 1 \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | head -n 1)
+            cd "$CD_PATH"
+            DOCKERFILE=$(find . -maxdepth 1 \( -name 'Dockerfile' -o -name 'Dockerfile.*' \))
+            echo "Dockerfile found: $DOCKERFILE"
+
             if [ -z "$DOCKERFILE" ]; then
               echo "No Dockerfile in $DIR. Skipping."
+              cd - > /dev/null
               continue
             fi
 
             docker build -f "$DOCKERFILE" \
               -t "$IMAGE_REG/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
               -t "$IMAGE_REG/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG" \
-              "$DIR"
+              .
 
             docker push "$IMAGE_REG/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
             docker push "$IMAGE_REG/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG"
 
             echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
+            cd - > /dev/null
           done
+
+      - name: Trigger Security Scanning
+        if: success()
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.CI_PAT }}
+          repository: ${{ github.repository }}
+          event-type: start-security-scanning
+          client-payload: >-
+            {
+              "repository": "${{ github.event.client_payload.repository }}",
+              "sha": "${{ github.event.client_payload.sha }}",
+              "ref": "${{ github.event.client_payload.ref }}"
+            }
