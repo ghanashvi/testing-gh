@@ -49,10 +49,9 @@ jobs:
 
           CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
 
-          # Identify directories containing Dockerfiles
           TARGET_DOCKER_DIRS=""
           for DIR in $CHANGED_DIRS; do
-            DOCKERFILES=$(find "$DIR" -maxdepth 1 -name 'Dockerfile*' -print)
+            DOCKERFILES=$(find "$DIR" -maxdepth 1 -type f -name 'Dockerfile*' -print)
             if [ -n "$DOCKERFILES" ]; then
               TARGET_DOCKER_DIRS="$TARGET_DOCKER_DIRS $DIR"
             fi
@@ -93,9 +92,9 @@ jobs:
             echo "Processing directory: $DIR"
             
             # Build each Dockerfile found in the directory
-            for DOCKERFILE in $(find "$DIR" -maxdepth 1 -name 'Dockerfile*' -print); do
+            for DOCKERFILE in $(find "$DIR" -maxdepth 1 -type f -name 'Dockerfile*' -print); do
               COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile-//; s/Dockerfile//')
-              COMPONENT=${COMPONENT:-default} # Fallback to 'default' if there's no component suffix
+              COMPONENT=${COMPONENT:-default}
 
               echo "Building component: $COMPONENT using Dockerfile: $DOCKERFILE"
 
