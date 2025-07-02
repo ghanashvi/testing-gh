@@ -116,17 +116,3 @@ jobs:
 
             echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
           done
-
-      - name: Trigger Security Scanning
-        if: success()
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.CI_PAT }}
-          repository: ${{ github.repository }}
-          event-type: start-security-scanning
-          client-payload: >-
-            {
-              "repository": "${{ github.event.client_payload.repository }}",
-              "sha": "${{ github.event.client_payload.sha }}",
-              "ref": "${{ github.event.client_payload.ref }}"
-            }
