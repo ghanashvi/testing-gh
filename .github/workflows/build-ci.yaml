@@ -39,14 +39,13 @@ jobs:
             **/Dockerfile.*
             **/Dockerfile-*
             **/*.py
-            # Add more file extensions here for other code changes
 
       - name: Prepare Docker Build Contexts
         id: prepare-docker-contexts
         run: |
           CHANGED_FILES="${{ steps.detect-changes.outputs.all_changed_files }}"
           echo "Changed files: $CHANGED_FILES"
-          cd ${{ steps.clone_repo.outputs.REPO_NAME }}
+          cd "${{ steps.clone_repo.outputs.REPO_NAME }}" || exit
 
           CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
 
@@ -87,9 +86,12 @@ jobs:
           TARGET_DOCKER_DIRS="${{ env.TARGET_DOCKER_DIRS }}"
           echo "Directories to build: $TARGET_DOCKER_DIRS"
 
+          cd "$REPO_NAME" || exit
           for DIR in $TARGET_DOCKER_DIRS; do
             [ -z "$DIR" ] && continue
-
+            
+            echo "Processing directory: $DIR"
+            
             # Build each Dockerfile found in the directory
             for DOCKERFILE in $(find "$DIR" -maxdepth 1 -name 'Dockerfile*' -print); do
               COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile-//; s/Dockerfile//')
