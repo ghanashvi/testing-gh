@@ -18,50 +18,39 @@ jobs:
       - name: Clone Source Repository
         run: |
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          git clone "https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git" "$REPO_NAME"
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
           cd "$REPO_NAME"
           git checkout "${{ github.event.client_payload.sha }}"
 
       - name: Detect Changed Docker Components
         id: detect-changes
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            **/Dockerfile
+            **/Dockerfile.*
+            **/*.py  
+            **/*.js 
+
+      - name: Prepare Changed Directories
+        id: prepare-changed-dirs
         run: |
-          set -e
-          REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          cd "$REPO_NAME"
-          
-          CURRENT_COMMIT="${{ github.event.client_payload.sha }}"
-          CHANGED_DIRS=""
+          CHANGED_FILES="${{ steps.detect-changes.outputs.all_changed_files }}"
+          echo "Changed files: $CHANGED_FILES"
 
-          # Check if previous commit exists (not first commit)
-          if git rev-parse "${CURRENT_COMMIT}^" >/dev/null 2>&1; then
-            PREVIOUS_COMMIT=$(git rev-parse "${CURRENT_COMMIT}^")
-            echo "Comparing $PREVIOUS_COMMIT -> $CURRENT_COMMIT"
-            
-            # Detect changed directories containing Dockerfiles
-            CHANGED_DIRS=$(git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_COMMIT" | \
-              grep -E '(^|/)(Dockerfile|Dockerfile\..*)$' | xargs -r -I{} dirname {} | sort -u)
-              
-            # Fallback: detect changes within Dockerfile directories
-            if [ -z "$CHANGED_DIRS" ]; then
-              DOCKER_DIRS=$(find . \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | xargs -r dirname | sort -u)
-              for DIR in $DOCKER_DIRS; do
-                if git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_COMMIT" -- "$DIR" | grep -q .; then
-                  CHANGED_DIRS="$CHANGED_DIRS $DIR"
-                fi
-              done
+          # Determine unique directories with changed files
+          CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
+
+          # Find directory paths with Dockerfiles and code changes
+          TARGET_DOCKER_DIRS=""
+          for DIR in $CHANGED_DIRS; do
+            if [ -f "$DIR/Dockerfile" ] || [ -n "$(find $DIR -maxdepth 1 -name 'Dockerfile.*' -print -quit)" ]; then
+              TARGET_DOCKER_DIRS="$TARGET_DOCKER_DIRS $DIR"
             fi
-          else
-            echo "First commit detected. Building all Dockerfiles."
-            CHANGED_DIRS=$(find . \( -name 'Dockerfile' -o -name 'Dockerfile.*' \) | xargs -r dirname | sort -u)
-          fi
+          done
 
-          # Include root directory if it has a Dockerfile
-          if [ -f "Dockerfile" ]; then
-            CHANGED_DIRS="$CHANGED_DIRS ."
-          fi
-
-          echo "Detected changed directories: $CHANGED_DIRS"
-          echo "DOCKER_DIRS_CSV=$(echo $CHANGED_DIRS | xargs | tr ' ' ',')" >> $GITHUB_ENV
+          echo "Directories to build: $TARGET_DOCKER_DIRS"
+          echo "TARGET_DOCKER_DIRS=$TARGET_DOCKER_DIRS" >> $GITHUB_ENV
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
@@ -87,19 +76,15 @@ jobs:
           FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
           IMAGE_REG="us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo"
 
-          CHANGED_DIRS=$(echo "$DOCKER_DIRS_CSV" | tr ',' ' ')
-          echo "Directories to build: $CHANGED_DIRS"
+          TARGET_DOCKER_DIRS="${{ env.TARGET_DOCKER_DIRS }}"
+          echo "Directories to build: $TARGET_DOCKER_DIRS"
 
-          for DIR in $CHANGED_DIRS; do
+          for DIR in $TARGET_DOCKER_DIRS; do
             [ -z "$DIR" ] && continue
 
             COMPONENT=$(basename "$DIR")
-            [ "$DIR" = "." ] && COMPONENT="$REPO_NAME"
 
-            CD_PATH="$REPO_NAME/$DIR"
-            echo "Building $COMPONENT from $CD_PATH"
-
-            cd "$CD_PATH"
+            cd "$REPO_NAME/$DIR"
             DOCKERFILE=$(find . -maxdepth 1 \( -name 'Dockerfile' -o -name 'Dockerfile.*' \))
             echo "Dockerfile found: $DOCKERFILE"
 
@@ -120,4 +105,3 @@ jobs:
             echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
             cd - > /dev/null
           done
-
