@@ -14,46 +14,52 @@ jobs:
     steps:
       - name: Checkout CI Orchestration Repo
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 2  # Fetch only the last two commits for accurate comparison
 
       - name: Clone Source Repository
         run: |
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
-          cd "$REPO_NAME"
-          git checkout "${{ github.event.client_payload.sha }}"
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git \$REPO_NAME\
+          cd "$REPO_NAME\
+          git checkout \${{ github.event.client_payload.sha }}"
 
       - name: Detect Changed Files
         id: detect-changes
         run: |
+          REPO_NAME=$(echo \${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           cd "$REPO_NAME"
-          
-          # Use current commit SHA from event payload
-          CURRENT_SHA="${{ github.event.client_payload.sha }}"
-          # Use the previous commit for change detection
-          PREVIOUS_COMMIT=$(git rev-parse HEAD^)
 
-          # Find directories with Dockerfiles that had changes
-          CHANGED_DOCKER_DIRS=$(git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_SHA" | grep -E '(^|/)Dockerfile(\.|$)' | xargs -I{} dirname {} | sort -u)
-
-          # If no Dockerfiles were directly changed, see if changes exist in their directories
-          if [ -z "$CHANGED_DOCKER_DIRS" ]; then
-            # Find all directories containing Dockerfiles
-            DOCKER_DIRS=$(find . -name "Dockerfile" -o -name "Dockerfile.*" | xargs -I{} dirname {} | sort -u)
-
-            # Check for changes in these directories
-            for DIR in $DOCKER_DIRS; do
-              CHANGES=$(git diff --name-only "$PREVIOUS_COMMIT" "$CURRENT_SHA" -- "$DIR")
-              if [ -n "$CHANGES" ]; then
-                CHANGED_DOCKER_DIRS="$CHANGED_DOCKER_DIRS $DIR"
-              fi
-            done
+          # Handle first commit case
+          if git rev-parse HEAD^1 >/dev/null 2>&1; then
+            # Not the first commit, get previous commit hash
+            PREVIOUS_COMMIT=$(git rev-parse HEAD^1)
+            
+            # Find all directories containing Dockerfiles that were modified
+            CHANGED_DOCKER_DIRS=$(git diff --name-only \$PREVIOUS_COMMIT" \${{ github.event.client_payload.sha }}" | grep -E '(^|/)Dockerfile$|Dockerfile\.' | xargs -I{} dirname {} | sort -u)
+            
+            # If no Dockerfile was changed, check if any file was changed in directories containing Dockerfiles
+            if [ -z "$CHANGED_DOCKER_DIRS" ]; then
+              # Find all directories with Dockerfiles
+              DOCKER_DIRS=$(find . -name "Dockerfile" -o -name \Dockerfile.*" | xargs -I{} dirname {} | sort -u)
+              
+              # Check if any files in these directories were changed
+              for DIR in $DOCKER_DIRS; do
+                CHANGED_FILES=$(git diff --name-only "$PREVIOUS_COMMIT" "${{ github.event.client_payload.sha }}" -- "$DIR")
+                if [ -n "$CHANGED_FILES" ]; then
+                CHANGED_DOCKER_DIRS="$CHANGED_DOCKER_DIRS $DIR\
+                fi
+              done
+            fi
+          else
+            # First commit, consider all Dockerfiles as changed
+            CHANGED_DOCKER_DIRS=$(find . -name \Dockerfile" -o -name "Dockerfile.*" | xargs -I{} dirname {} | sort -u)
+            echo "First commit detected, building all Dockerfiles\
           fi
-
-          # Export list of changed directories
-          echo "CHANGED_DOCKER_DIRS=$(echo $CHANGED_DOCKER_DIRS)" >> $GITHUB_ENV
-          echo "Changed Docker directories: $CHANGED_DOCKER_DIRS"
+          
+          # Store the list as a GitHub environment variable (comma-separated)
+          echo "DOCKER_DIRS_CSV=$(echo $CHANGED_DOCKER_DIRS | tr ' ' ',')" >> $GITHUB_ENV
+          
+          # Output for debugging
+          echo \Changed Docker directories: $CHANGED_DOCKER_DIRS"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
@@ -73,39 +79,49 @@ jobs:
 
       - name: Build and Push Changed Images
         run: |
-          # Retrieve the list of changed Docker directories
-          CHANGED_DOCKER_DIRS="${{ steps.detect-changes.outputs.CHANGED_DOCKER_DIRS }}"
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           COMMIT_TAG="${{ github.event.client_payload.sha }}"
           FEATURE_TAG=$(echo "${{ github.event.client_payload.ref }}" | sed 's|refs/heads/||')
-
+          
+          # Convert comma-separated list back to space-separated
+          CHANGED_DIRS=$(echo "$DOCKER_DIRS_CSV" | tr ',' ' ')
+          
           # Check if there are any changed Docker directories
-          if [ -z "$CHANGED_DOCKER_DIRS" ]; then
+          if [ -z "$CHANGED_DIRS\ ]; then
             echo "No Dockerfile changes detected. Skipping build."
             exit 0
           fi
-
+          
           # Process each changed directory
-          for DIR in $CHANGED_DOCKER_DIRS; do
-            # Extract component name based on directory structure
+          for DIR in $CHANGED_DIRS; do
+            if [ -z "$DIR\]; then
+              continue
+            fi
+            
+            # Extract component name from directory path (last segment)
             COMPONENT=$(basename "$DIR")
-
-            # Locate Dockerfile in the directory
-            DOCKERFILE=$(find "$DIR" -maxdepth 1 -name "Dockerfile" -o -name "Dockerfile.*" | head -n 1)
-
+            
+            # If root directory, use the repo name as component
+            if [ \$DIR" = "." ]; then
+              COMPONENT=$REPO_NAME
+            fi
+            
+            # Find Dockerfile in the directory
+            DOCKERFILE=$(find \$DIR" -maxdepth 1 -name \Dockerfile" -o -name "Dockerfile.*" | head -n 1)
+            
             if [ -n "$DOCKERFILE" ]; then
               echo "Building Docker image for component: $COMPONENT..."
-
-              # Build the image using appropriate tags
-              docker build -f "$DOCKERFILE" \
-                           -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
-                           -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG" \
-                           "$DIR"
-
+              
+              # Build image with tags
+              docker build -f "$DOCKERFILE\ \
+                         -t \us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
+                         -t "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG" \
+                         \$DIR"
+              
               # Push images to Google Artifact Registry
-              docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-              docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG"
-
+              docker push \us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+              docker push "us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo/$REPO_NAME-$COMPONENT:insecure-$FEATURE_TAG\
+              
               echo "Successfully built and pushed $REPO_NAME-$COMPONENT to Quarantine Repository"
             else
               echo "Warning: No Dockerfile found in $DIR. Skipping build."
@@ -119,9 +135,8 @@ jobs:
           token: ${{ secrets.CI_PAT }}
           repository: ${{ github.repository }}
           event-type: start-security-scanning
-          client-payload: >-
-            {
-              "repository": "${{ github.event.client_payload.repository }}",
-              "sha": "${{ github.event.client_payload.sha }}",
-              "ref": "${{ github.event.client_payload.ref }}"
-            }
+          client-payload: '{
+            \repository": "${{ github.event.client_payload.repository }}\
+            "sha": "${{ github.event.client_payload.sha }}",
+            "ref": "${{ github.event.client_payload.ref }}"
+          }'
