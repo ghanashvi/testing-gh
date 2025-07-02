@@ -16,17 +16,19 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Clone Source Repository
+        id: clone_repo
         run: |
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
           cd "$REPO_NAME"
           git checkout "${{ github.event.client_payload.sha }}"
+          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Detect Changed Docker Components
         id: detect-changes
         uses: tj-actions/changed-files@v44
         with:
-          path: $(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+          path: ${{ steps.clone_repo.outputs.REPO_NAME }}
           files: |
             **/Dockerfile
             **/Dockerfile.*
