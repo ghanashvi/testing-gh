@@ -47,18 +47,11 @@ jobs:
           echo "Changed files: $CHANGED_FILES"
           cd "${{ steps.clone_repo.outputs.REPO_NAME }}" || exit
 
-          CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
+          # Identify specific changed Dockerfiles among the changed files
+          TARGET_DOCKERFILES=$(echo "$CHANGED_FILES" | grep -E 'Dockerfile.*')
 
-          TARGET_DOCKER_DIRS=""
-          for DIR in $CHANGED_DIRS; do
-            DOCKERFILES=$(find "$DIR" -maxdepth 1 -type f -name 'Dockerfile*' -print)
-            if [ -n "$DOCKERFILES" ]; then
-              TARGET_DOCKER_DIRS="$TARGET_DOCKER_DIRS $DIR"
-            fi
-          done
-
-          echo "Directories to build: $TARGET_DOCKER_DIRS"
-          echo "TARGET_DOCKER_DIRS=$TARGET_DOCKER_DIRS" >> $GITHUB_ENV
+          echo "Dockerfiles to build: $TARGET_DOCKERFILES"
+          echo "TARGET_DOCKERFILES=$TARGET_DOCKERFILES" >> $GITHUB_ENV
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v1
@@ -82,28 +75,24 @@ jobs:
           REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           COMMIT_TAG="${{ github.event.client_payload.sha }}"
 
-          TARGET_DOCKER_DIRS="${{ env.TARGET_DOCKER_DIRS }}"
-          echo "Directories to build: $TARGET_DOCKER_DIRS"
+          TARGET_DOCKERFILES="${{ env.TARGET_DOCKERFILES }}"
+          echo "Dockerfiles to build: $TARGET_DOCKERFILES"
 
           cd "$REPO_NAME" || exit
-          for DIR in $TARGET_DOCKER_DIRS; do
-            [ -z "$DIR" ] && continue
-            
-            echo "Processing directory: $DIR"
-            
-            # Build each Dockerfile found in the directory
-            for DOCKERFILE in $(find "$DIR" -maxdepth 1 -type f -name 'Dockerfile*' -print); do
-              COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile-//; s/Dockerfile//')
-              COMPONENT=${COMPONENT:-default}
+          for DOCKERFILE in $TARGET_DOCKERFILES; do
+            [ -z "$DOCKERFILE" ] && continue
 
-              echo "Building component: $COMPONENT using Dockerfile: $DOCKERFILE"
+            DIR=$(dirname "$DOCKERFILE")
+            COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile-//; s/Dockerfile//')
+            COMPONENT=${COMPONENT:-default}
 
-              docker build -f "$DOCKERFILE" \
-                -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
-                "$DIR"
+            echo "Building component: $COMPONENT using Dockerfile: $DOCKERFILE"
 
-              docker push "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+            docker build -f "$DOCKERFILE" \
+              -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
+              "$DIR"
 
-              echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
-            done
+            docker push "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+
+            echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
           done
