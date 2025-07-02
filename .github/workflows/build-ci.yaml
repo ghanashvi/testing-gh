@@ -29,8 +29,8 @@ jobs:
           files: |
             **/Dockerfile
             **/Dockerfile.*
-            **/*.py  
-            **/*.js 
+            **/*.py
+            # Add more file extensions here to detect code changes that require a Docker rebuild
 
       - name: Prepare Changed Directories
         id: prepare-changed-dirs
@@ -39,15 +39,17 @@ jobs:
           echo "Changed files: $CHANGED_FILES"
 
           # Determine unique directories with changed files
-          CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
+          if [ -n "$CHANGED_FILES" ]; then
+            CHANGED_DIRS=$(echo "$CHANGED_FILES" | xargs -n1 dirname | sort -u)
 
-          # Find directory paths with Dockerfiles and code changes
-          TARGET_DOCKER_DIRS=""
-          for DIR in $CHANGED_DIRS; do
-            if [ -f "$DIR/Dockerfile" ] || [ -n "$(find $DIR -maxdepth 1 -name 'Dockerfile.*' -print -quit)" ]; then
-              TARGET_DOCKER_DIRS="$TARGET_DOCKER_DIRS $DIR"
-            fi
-          done
+            # Find directory paths with Dockerfiles and code changes
+            TARGET_DOCKER_DIRS=""
+            for DIR in $CHANGED_DIRS; do
+              if [ -f "$DIR/Dockerfile" ] || [ -n "$(find $DIR -maxdepth 1 -name 'Dockerfile.*' -print -quit)" ]; then
+                TARGET_DOCKER_DIRS="$TARGET_DOCKER_DIRS $DIR"
+              fi
+            done
+          fi
 
           echo "Directories to build: $TARGET_DOCKER_DIRS"
           echo "TARGET_DOCKER_DIRS=$TARGET_DOCKER_DIRS" >> $GITHUB_ENV
