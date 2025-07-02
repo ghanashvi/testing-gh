@@ -26,6 +26,7 @@ jobs:
         id: detect-changes
         uses: tj-actions/changed-files@v44
         with:
+          path: $(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
           files: |
             **/Dockerfile
             **/Dockerfile.*
