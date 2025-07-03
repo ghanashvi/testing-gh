@@ -166,7 +166,7 @@ jobs:
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
         echo "Polling scan status $IMG"
         for i in {1..10}; do
-            STATUS=$(gcloud container images describe $IMG --format="value(image_summary.scan_status)")
+            STATUS=$(gcloud artifacts docker images describe $IMG --format="value(image_summary.scan_status)")
             echo "Scan status: $STATUS"
             if [[ "$STATUS" == "FINISHED_SUCCESS" ]]; then
               echo "scan_passed=true" >> $GITHUB_OUTPUT
@@ -178,6 +178,7 @@ jobs:
             sleep 20
         done
 
+      
     # - name: Fail on high/critical
     #   if: steps.poll.outputs.severity == 'CRITICAL' || steps.poll.outputs.severity == env.SEVERITY_STOP
     #   run: |
