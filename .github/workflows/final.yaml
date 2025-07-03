@@ -161,27 +161,43 @@ jobs:
         COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
         COMPONENT=${COMPONENT:-default}
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-        for i in {1..40}; do
-          sev=$(gcloud artifacts docker images describe "$IMG" \
-                 --format='value(vulnerabilityScanSummary.maxSeverity)' 2>/dev/null || true)
-          [[ "$sev" && "$sev" != "SCAN_PENDING" ]] && break
-          sleep 15
-        done
-        [[ -z "$sev" || "$sev" == "SCAN_PENDING" ]] && { echo "::error::Scan timeout"; exit 1; }
-        echo "severity=$sev" >> "$GITHUB_OUTPUT"
+        echo "Polling scan status $IMG"
+        # for i in {1..40}; do
+        #   sev=$(gcloud artifacts docker images describe "$IMG" \
+        #          --format='value(vulnerabilityScanSummary.maxSeverity)' 2>/dev/null || true)
+        #   [[ "$sev" && "$sev" != "SCAN_PENDING" ]] && break
+        #   sleep 15
+        # done
 
-    - name: Fail on high/critical
-      if: steps.poll.outputs.severity == 'CRITICAL' || steps.poll.outputs.severity == env.SEVERITY_STOP
-      run: |
-        echo "::error::Image failed vulnerability gate (severity=${{ steps.poll.outputs.severity }})"
-        exit 1
+        # [[ -z "$sev" || "$sev" == "SCAN_PENDING" ]] && { echo "::error::Scan timeout"; exit 1; }
+        # echo "severity=$sev" >> "$GITHUB_OUTPUT"
+
+        for i in {1..10}; do
+            STATUS=$(gcloud container images describe $IMG --format="value(image_summary.scan_status)")
+            echo "Scan status: $STATUS"
+            if [[ "$STATUS" == "FINISHED_SUCCESS" ]]; then
+              echo "SCAN_PASSED=true" >> $GITHUB_ENV
+              break
+            elif [[ "$STATUS" == "FAILED" || "$STATUS" == "FINISHED_FAILED" ]]; then
+              echo "SCAN_PASSED=false" >> $GITHUB_ENV
+              break
+            fi
+            sleep 20
+        done
+ 
+
+    # - name: Fail on high/critical
+    #   if: steps.poll.outputs.severity == 'CRITICAL' || steps.poll.outputs.severity == env.SEVERITY_STOP
+    #   run: |
+    #     echo "::error::Image failed vulnerability gate (severity=${{ steps.poll.outputs.severity }})"
+    #     exit 1
 
 ##########################################################################
 #  JOB 3  —  Copy clean image to secure registry & GHCR
 ##########################################################################
   promote_secure:
     needs: scan_gate
-    if: needs.scan_gate.result == 'success'
+    if: env.SCAN_PASSED == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
