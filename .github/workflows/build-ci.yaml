@@ -117,94 +117,99 @@ jobs:
       IMAGE_REGISTRY: 'us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo'
 
     steps:
-      # ------------------------------------------------------------------ #
-      - name: Checkout CI Orchestration Repo
-        uses: actions/checkout@v3
+    # ------------------------------------------------------------------ #
+    - name: Checkout CI Orchestration Repo
+      uses: actions/checkout@v3
 
-      # ------------------------------------------------------------------ #
-      - name: Clone Source Repository
-        id: clone_repo
-        run: |
-          REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
-          cd "$REPO_NAME"
-          git checkout "${{ github.event.client_payload.sha }}"
-          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
+    # ------------------------------------------------------------------ #
+    - name: Clone Source Repository
+      id: clone_repo
+      run: |
+        REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+        git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }}.git "$REPO_NAME"
+        cd "$REPO_NAME"
+        git checkout "${{ github.event.client_payload.sha }}"
+        echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------------ #
-      - name: Detect Changed Docker Components
-        id: detect-changes
-        uses: tj-actions/changed-files@v46
-        with:
-          token: ${{ github.token }}
-          # point the diff at the cloned repo’s root
-          path: ${{ steps.clone_repo.outputs.REPO_NAME }}
+    # ------------------------------------------------------------------ #
+    # NEW ─ Resolve an actual base commit SHA (handles first run safely)
+    - name: Resolve base SHA
+      id: base
+      run: |
+        cd "${{ steps.clone_repo.outputs.REPO_NAME }}"
+        if git rev-parse HEAD~1 >/dev/null 2>&1; then
+          BASE=$(git rev-parse HEAD~1)
+        else
+          BASE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 # Git’s empty tree
+          echo "::notice::First run – diffing against empty tree"
+        fi
+        echo "sha=$BASE" >> "$GITHUB_OUTPUT"
 
-          # ✅ FIX 2: first‑run fallback — Git’s empty tree object
-          base_sha: ${{ github.event.before || '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }}
-          sha: ${{ github.event.client_payload.sha }}
+    # ------------------------------------------------------------------ #
+    - name: Detect Changed Docker Components
+      id: detect-changes
+      uses: tj-actions/changed-files@v46
+      with:
+        token: ${{ github.token }}
+        path: ${{ steps.clone_repo.outputs.REPO_NAME }}
+        base_sha: ${{ steps.base.outputs.sha }} # ← uses resolved SHA
+        sha: ${{ github.event.client_payload.sha }}
+        use_rest_api: false # local diff only
+        files: |
+          **/Dockerfile*
+          **/*.py
 
-          files: |
-            **/Dockerfile
-            **/Dockerfile.*
-            **/Dockerfile-*
-            **/*.py
+    # ------------------------------------------------------------------ #
+    - name: Prepare Docker Build Contexts
+      id: prepare-docker-contexts
+      run: |
+        CHANGED_FILES="${{ steps.detect-changes.outputs.all_changed_files }}"
+        echo "Changed files: $CHANGED_FILES"
+        cd "${{ steps.clone_repo.outputs.REPO_NAME }}" || exit
 
-      # ------------------------------------------------------------------ #
-      - name: Prepare Docker Build Contexts
-        id: prepare-docker-contexts
-        run: |
-          CHANGED_FILES="${{ steps.detect-changes.outputs.all_changed_files }}"
-          echo "Changed files: $CHANGED_FILES"
-          cd "${{ steps.clone_repo.outputs.REPO_NAME }}" || exit
+        TARGET_DOCKERFILES=$(echo "$CHANGED_FILES" | grep -E 'Dockerfile' | tr '\n' ' ')
+        echo "Dockerfiles to build: $TARGET_DOCKERFILES"
+        echo "TARGET_DOCKERFILES=$TARGET_DOCKERFILES" >> $GITHUB_ENV
 
-          # Identify changed Dockerfiles, convert newlines → spaces
-          TARGET_DOCKERFILES=$(echo "$CHANGED_FILES" | grep -E 'Dockerfile' | tr '\n' ' ')
-          echo "Dockerfiles to build: $TARGET_DOCKERFILES"
+    # ------------------------------------------------------------------ #
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ env.SERVICE_ACCOUNT }}
 
-          # ✅ FIX 3: export as space‑separated string (loop stays unchanged)
-          echo "TARGET_DOCKERFILES=$TARGET_DOCKERFILES" >> $GITHUB_ENV
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
 
-      # ------------------------------------------------------------------ #
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v1
-        with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ env.SERVICE_ACCOUNT }}
+    - name: Setup gcloud CLI
+      uses: google-github-actions/setup-gcloud@v1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+    - name: Configure Docker for Artifact Registry
+      run: gcloud auth configure-docker us-central1-docker.pkg.dev
 
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v1
+    # ------------------------------------------------------------------ #
+    - name: Build and Push Changed Docker Images
+      run: |
+        set -e
+        REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
+        COMMIT_TAG="${{ github.event.client_payload.sha }}"
+        TARGET_DOCKERFILES="${{ env.TARGET_DOCKERFILES }}"
 
-      - name: Configure Docker for Artifact Registry
-        run: |
-          gcloud auth configure-docker us-central1-docker.pkg.dev
+        cd "$REPO_NAME" || exit
+        for DOCKERFILE in $TARGET_DOCKERFILES; do
+          [ -z "$DOCKERFILE" ] && continue
 
-      # ------------------------------------------------------------------ #
-      - name: Build and Push Changed Docker Images
-        run: |
-          set -e
-          REPO_NAME=$(echo "${{ github.event.client_payload.repository }}" | cut -d'/' -f2)
-          COMMIT_TAG="${{ github.event.client_payload.sha }}"
-          TARGET_DOCKERFILES="${{ env.TARGET_DOCKERFILES }}"
+          DIR=$(dirname "$DOCKERFILE")
+          COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile[-\.]*//')
+          COMPONENT=${COMPONENT:-default}
 
-          cd "$REPO_NAME" || exit
-          for DOCKERFILE in $TARGET_DOCKERFILES; do
-            [ -z "$DOCKERFILE" ] && continue
+          echo "Building component: $COMPONENT using Dockerfile: $DOCKERFILE"
 
-            DIR=$(dirname "$DOCKERFILE")
-            COMPONENT=$(basename "$DOCKERFILE" | sed 's/Dockerfile[-\.]*//')
-            COMPONENT=${COMPONENT:-default}
+          docker build -f "$DOCKERFILE" \
+            -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
+            "$DIR"
 
-            echo "Building component: $COMPONENT using Dockerfile: $DOCKERFILE"
+          docker push "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
 
-            docker build -f "$DOCKERFILE" \
-              -t "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG" \
-              "$DIR"
-
-            docker push "${{ env.IMAGE_REGISTRY }}/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-
-            echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
-          done
+          echo "Successfully built and pushed $REPO_NAME-$COMPONENT"
+        done
