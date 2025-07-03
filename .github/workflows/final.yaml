@@ -161,11 +161,11 @@ jobs:
         COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
         COMPONENT=${COMPONENT:-default}
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-        for i in {1..40}; do
+        for i in {1..24}; do
           sev=$(gcloud artifacts docker images describe "$IMG" \
                  --format='value(vulnerabilityScanSummary.maxSeverity)' 2>/dev/null || true)
           [[ "$sev" && "$sev" != "SCAN_PENDING" ]] && break
-          sleep 15
+          sleep 5
         done
         [[ -z "$sev" || "$sev" == "SCAN_PENDING" ]] && { echo "::error::Scan timeout"; exit 1; }
         echo "severity=$sev" >> "$GITHUB_OUTPUT"
