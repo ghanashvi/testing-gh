@@ -183,4 +183,4 @@ jobs:
         GHCR_IMG="ghcr.io/${{ github.repository_owner }}/$COMPONENT:secure-$COMMIT_TAG"
         echo "${{ github.token }}" | docker login ghcr.io -u ${GITHUB_ACTOR} --password-stdin
         docker tag "$SRC" "$GHCR_IMG"
-        docker push "$GHCR_IMG"
+        docker push "$GHCR_IMG
