@@ -140,7 +140,8 @@ jobs:
           path: ${{ steps.clone_repo.outputs.REPO_NAME }}
 
           # ✅ FIX 2: first‑run fallback — Git’s empty tree object
-          base_commit: ${{ github.event.before || '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }}
+          base_sha: ${{ github.event.before || '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }}
+          sha: ${{ github.event.client_payload.sha }}
 
           files: |
             **/Dockerfile
