@@ -15,8 +15,7 @@ env:
   # ── Artifact Registry paths
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_LOCATION:          us
-  GAR_REGION:            us-central1
+  GAR_LOCATION:          us-central1
 
   # ── Scan polling settings (6 min total)
   POLL_INTERVAL: 10      # seconds
@@ -101,7 +100,7 @@ jobs:
     - uses: docker/setup-buildx-action@v2
 
     - name: Configure Docker for GAR
-      run: gcloud auth configure-docker ${{ env.GAR_REGION }}-docker.pkg.dev
+      run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
     # 8. Build & push each Dockerfile
     - name: Build and push images
@@ -156,7 +155,7 @@ jobs:
     - name: Install required gcloud components
       run: |
         gcloud components update
-        gcloud components install local-extract
+        gcloud components install container-analysis
 
     - name: Poll vulnerability scan
       id: poll
@@ -169,15 +168,24 @@ jobs:
         COMPONENT=${COMPONENT:-default}
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
 
+        # Check if the image exists
+        if ! gcloud artifacts docker images describe "$IMG" --location=$GAR_LOCATION >/dev/null 2>&1; then
+          echo "::error::Image $IMG not found in $GAR_LOCATION"
+          exit 1
+        fi
+
         for (( i=1; i<=${MAX_ATTEMPTS}; i++ )); do
           echo "Attempt $i of ${MAX_ATTEMPTS}"
           
           # Initiate a new scan
           gcloud artifacts docker images scan "$IMG" --location=$GAR_LOCATION --remote
 
+          # Wait for the scan to complete (adjust the sleep time as needed)
+          sleep 30
+
           # Get the scan results
           RESULT=$(gcloud artifacts docker images list-vulnerabilities "$IMG" \
-            --location=$GAR_REGION \
+            --location=$GAR_LOCATION \
             --format='value(vulnerability.effectiveSeverity)')
 
           if [[ -n "$RESULT" ]]; then
