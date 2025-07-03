@@ -158,7 +158,9 @@ jobs:
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
         
         # Get the latest scan ID for the image
-        SCAN_ID=$(gcloud artifacts docker images describe "$IMG" --location=$GAR_LOCATION --format='value(related_artifacts.occurrences.resourceUri)' | grep "^projects" | head -1)
+        SCAN_ID=$(gcloud artifacts docker images describe "$IMG" \
+          --format='value(relatedArtifacts.occurrences[0].resourceUri)' | \
+          grep -o 'projects/.*/locations/.*/scans/.*')
 
         if [[ -z "$SCAN_ID" ]]; then
           echo "::error::No scan found for $IMG"
