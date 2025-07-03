@@ -150,10 +150,13 @@ jobs:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
         service_account:            ${{ env.SERVICE_ACCOUNT }}
 
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
     - name: Install required gcloud components
       run: |
-        sudo apt-get update
-        sudo apt-get install -y google-cloud-cli-local-extract
+        gcloud components update
+        gcloud components install local-extract
 
     - name: Poll vulnerability scan
       id: poll
