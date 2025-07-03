@@ -94,11 +94,16 @@ jobs:
     - name: Collect built Dockerfiles
       id: collect
       run: |
-        jq -Rsc 'split("\n")[:-1]' /tmp/built_dockerfiles.txt > /tmp/list.json
-        echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
+        if [ -s /tmp/built_dockerfiles.txt ]; then
+          jq -Rsc 'split("\n")[:-1]' /tmp/built_dockerfiles.txt > /tmp/list.json
+          echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
+        else
+          echo "dockerfiles_json=[]" >> "$GITHUB_OUTPUT"
+        fi
 
   scan_gate:
     needs: build
+    if: needs.build.outputs.built_dockerfiles != '[]'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -106,6 +111,7 @@ jobs:
       matrix:
         dockerfile: ${{ fromJson(needs.build.outputs.built_dockerfiles) }}
     steps:
+    - uses: actions/checkout@v3
     - uses: google-github-actions/auth@v1
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
@@ -155,8 +161,8 @@ jobs:
         fi
 
   promote_secure:
-    needs: scan_gate
-    if: needs.scan_gate.result == 'success'
+    needs: [build, scan_gate]
+    if: needs.build.outputs.built_dockerfiles != '[]' && needs.scan_gate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -164,6 +170,7 @@ jobs:
       matrix:
         dockerfile: ${{ fromJson(needs.build.outputs.built_dockerfiles) }}
     steps:
+    - uses: actions/checkout@v3
     - uses: google-github-actions/auth@v1
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
