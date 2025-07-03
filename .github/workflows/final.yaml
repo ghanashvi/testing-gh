@@ -161,14 +161,8 @@ jobs:
       run: |
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
 
-        # # Check if the image exists
-        # if ! gcloud artifacts docker images describe "$IMG" --location=$GAR_LOCATION >/dev/null 2>&1; then
-        #   echo "::error::Image $IMG not found in $GAR_LOCATION"
-        #   exit 1
-        # fi
-
-        # Initiate a new scan
-        SCAN_RESULT=$(gcloud artifacts docker images scan "$IMG" --location=us --format="value(response.scan)")
+        # Initiate a new scan with --quiet flag
+        SCAN_RESULT=$(gcloud artifacts docker images scan "$IMG" --location=us --format="value(response.scan)" --quiet)
         
         if [[ -z "$SCAN_RESULT" ]]; then
           echo "::error::Failed to initiate scan for $IMG"
