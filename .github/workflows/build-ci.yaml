@@ -136,7 +136,7 @@ jobs:
         id: detect-changes
         uses: tj-actions/changed-files@v46
         with:
-          token: ${{ secrets.CI_PAT }}
+          token: ${{ github.token }}
           # point the diff at the cloned repo’s root
           path: ${{ steps.clone_repo.outputs.REPO_NAME }}
 
