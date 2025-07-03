@@ -1,4 +1,4 @@
-name: Build ➜ Scan ➜ Promote
+name: Build-Secure
 
 on:
   repository_dispatch:
