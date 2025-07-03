@@ -115,7 +115,7 @@ jobs:
           DIR=$(dirname "$DOCKERFILE")
           COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
           COMPONENT=${COMPONENT:-default}
-          IMAGE_TAG="$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+          IMAGE_TAG="$REPO_NAME:insecure-$COMMIT_TAG"
           FULL="$QUAR_IMAGE_REGISTRY/$IMAGE_TAG"
           echo "::group::Building $FULL"
           docker build -f "$DOCKERFILE" -t "$FULL" "$DIR"
@@ -132,7 +132,7 @@ jobs:
         echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
 
 ###############################################################################
-#  JOB 2  –  Scan gate (pass only when no HIGH or CRITICAL vulnerabilities)
+#  JOB 2  –  Scan gate (pass only when no vulnerabilities at all)
 ###############################################################################
   scan_gate:
     needs: build
@@ -159,9 +159,7 @@ jobs:
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
-        COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
-        COMPONENT=${COMPONENT:-default}
-        IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
+        IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
 
         # Check if the image exists
         if ! gcloud artifacts docker images describe "$IMG" --location=$GAR_LOCATION >/dev/null 2>&1; then
@@ -187,12 +185,12 @@ jobs:
             echo "Scan completed. Vulnerabilities found:"
             echo "$RESULT"
             
-            # Check if there are any HIGH or CRITICAL vulnerabilities
-            if echo "$RESULT" | grep -qE "HIGH|CRITICAL"; then
-              echo "::error::High or Critical vulnerabilities detected"
+            # Check if there are any vulnerabilities
+            if [[ -n "$RESULT" ]]; then
+              echo "::error::Vulnerabilities detected"
               exit 1
             else
-              echo "No High or Critical vulnerabilities detected"
+              echo "No vulnerabilities detected"
               exit 0
             fi
           else
@@ -229,10 +227,8 @@ jobs:
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
-        COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
-        COMPONENT=${COMPONENT:-default}
-        SRC="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-        DST="$SECURE_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:secure-$COMMIT_TAG"
+        SRC="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
+        DST="$SECURE_IMAGE_REGISTRY/$REPO_NAME:secure-$COMMIT_TAG"
         gcloud artifacts docker images copy "$SRC" --destination="$DST" --quiet
 
     - name: Push tag to GHCR
@@ -241,10 +237,8 @@ jobs:
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
-        COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
-        COMPONENT=${COMPONENT:-default}
-        SECURE_IMG="$SECURE_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:secure-$COMMIT_TAG"
-        GHCR_IMG="ghcr.io/${{ github.repository_owner }}/$REPO_NAME-$COMPONENT:secure-$COMMIT_TAG"
+        SECURE_IMG="$SECURE_IMAGE_REGISTRY/$REPO_NAME:secure-$COMMIT_TAG"
+        GHCR_IMG="ghcr.io/${{ github.repository_owner }}/$REPO_NAME:secure-$COMMIT_TAG"
         docker pull "$SECURE_IMG"
         echo "${{ github.token }}" | docker login ghcr.io -u ${GITHUB_ACTOR} --password-stdin
         docker tag "$SECURE_IMG" "$GHCR_IMG"
