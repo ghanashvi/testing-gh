@@ -166,6 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      packages: write
     strategy:
       matrix:
         dockerfile: ${{ fromJson(needs.build.outputs.built_dockerfiles) }}
@@ -175,6 +176,12 @@ jobs:
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
         service_account:            ${{ env.SERVICE_ACCOUNT }}
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+    - name: Configure Docker for GAR
+      run: |
+        gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
+        gcloud auth configure-docker
     - name: Copy & retag clean image
       env:
         REPO_NAME:  ${{ needs.build.outputs.repo_name }}
@@ -183,7 +190,9 @@ jobs:
       run: |
         SRC="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
         DST="$SECURE_IMAGE_REGISTRY/$REPO_NAME:secure-$COMMIT_TAG"
-        gcloud artifacts docker images copy "$SRC" --destination="$DST" --quiet
+        docker pull $SRC
+        docker tag $SRC $DST
+        docker push $DST
     - name: Push tag to GHCR
       env:
         REPO_NAME:  ${{ needs.build.outputs.repo_name }}
@@ -192,7 +201,6 @@ jobs:
       run: |
         SECURE_IMG="$SECURE_IMAGE_REGISTRY/$REPO_NAME:secure-$COMMIT_TAG"
         GHCR_IMG="ghcr.io/${{ github.repository_owner }}/$REPO_NAME:secure-$COMMIT_TAG"
-        docker pull "$SECURE_IMG"
         echo "${{ github.token }}" | docker login ghcr.io -u ${GITHUB_ACTOR} --password-stdin
         docker tag "$SECURE_IMG" "$GHCR_IMG"
         docker push "$GHCR_IMG"
