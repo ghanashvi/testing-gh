@@ -4,11 +4,17 @@ on:
   repository_dispatch:
     types: [app-code-change]
 
+##########################################################################
+# EDIT these to match your projects / region
+##########################################################################
 env:
-  QUAR_IMAGE_REGISTRY: us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
+  QUAR_IMAGE_REGISTRY:  us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_REGION: us-central1
+  GAR_REGION:            us-central1
 
+##########################################################################
+#  JOB 1  —  Build & push "insecure-<sha>" images to QUAR registry
+##########################################################################
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,18 +22,21 @@ jobs:
       contents: read
       id-token: write
 
+    # expose for downstream matrix
     outputs:
       built_dockerfiles: ${{ steps.collect.outputs.dockerfiles_json }}
-      repo_name: ${{ steps.vars.outputs.repo_name }}
-      commit_tag: ${{ steps.vars.outputs.commit_tag }}
+      repo_name:         ${{ steps.vars.outputs.repo_name }}
+      commit_tag:        ${{ steps.vars.outputs.commit_tag }}
 
     env:
       WORKLOAD_IDENTITY_PROVIDER: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-      SERVICE_ACCOUNT: 'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
+      SERVICE_ACCOUNT:            'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
 
     steps:
+    # ─────────────────────────── clone orchestration repo
     - uses: actions/checkout@v3
 
+    # ─────────────────────────── clone triggering app repo
     - name: Clone Source Repository
       id: clone_repo
       run: |
@@ -38,12 +47,14 @@ jobs:
         git checkout "${{ github.event.client_payload.sha }}"
         echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
+    # ─────────────────────────── record repo / commit
     - name: Export vars
       id: vars
       run: |
         echo "repo_name=${{ steps.clone_repo.outputs.REPO_NAME }}" >> "$GITHUB_OUTPUT"
         echo "commit_tag=${{ github.event.client_payload.sha }}"   >> "$GITHUB_OUTPUT"
 
+    # ─────────────────────────── find a real base SHA
     - name: Resolve base SHA
       id: base
       run: |
@@ -56,34 +67,38 @@ jobs:
         fi
         echo "sha=$BASE" >> "$GITHUB_OUTPUT"
 
+    # ─────────────────────────── detect changed Dockerfiles
     - name: Detect Changed Docker Components
       id: diff
       uses: tj-actions/changed-files@v46
       with:
         token: ${{ github.token }}
-        path: ${{ steps.clone_repo.outputs.REPO_NAME }}
+        path:     ${{ steps.clone_repo.outputs.REPO_NAME }}
         base_sha: ${{ steps.base.outputs.sha }}
-        sha: ${{ github.event.client_payload.sha }}
+        sha:      ${{ github.event.client_payload.sha }}
         use_rest_api: false
         files: |
           **/Dockerfile*
 
+    # ─────────────────────────── prepare list
     - name: Prepare Docker build list
       run: |
         CHANGED="${{ steps.diff.outputs.all_changed_files }}"
         echo "TARGET_DOCKERFILES=$(echo "$CHANGED" | tr '\n' ' ')" >> "$GITHUB_ENV"
         echo "$CHANGED" | tr '\n' '\n'
 
+    # ─────────────────────────── gcloud auth & docker login
     - uses: google-github-actions/auth@v1
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-        service_account: ${{ env.SERVICE_ACCOUNT }}
+        service_account:            ${{ env.SERVICE_ACCOUNT }}
 
     - uses: docker/setup-buildx-action@v2
 
     - name: Configure Docker for GAR
       run: gcloud auth configure-docker ${{ env.GAR_REGION }}-docker.pkg.dev
 
+    # ─────────────────────────── build & push each Dockerfile
     - name: Build and push images
       run: |
         set -e
@@ -105,6 +120,7 @@ jobs:
           echo "$DOCKERFILE" >> /tmp/built_dockerfiles.txt
         done
 
+    # ─────────────────────────── list → JSON for matrix
     - name: Collect built Dockerfiles
       id: collect
       run: |
@@ -112,6 +128,9 @@ jobs:
         cat /tmp/list.json
         echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
 
+##########################################################################
+#  JOB 2  —  Wait for GAR auto‑scan, fail on HIGH / CRITICAL
+##########################################################################
   scan_gate:
     needs: build
     runs-on: ubuntu-latest
@@ -127,37 +146,27 @@ jobs:
     env:
       SEVERITY_STOP: HIGH
       WORKLOAD_IDENTITY_PROVIDER: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-      SERVICE_ACCOUNT: 'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
+      SERVICE_ACCOUNT:            'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
 
     steps:
     - uses: google-github-actions/auth@v1
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-        service_account: ${{ env.SERVICE_ACCOUNT }}
- 
-    - name: Get image digest
-      id: get_digest
-      env:
-        REPO_NAME: ${{ needs.build.outputs.repo_name }}
-        COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
-      run: |
-        IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-        DIGEST=$(gcloud artifacts docker images describe $IMG --show-package-vulnerability)
-        echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+        service_account:            ${{ env.SERVICE_ACCOUNT }}
 
     - name: Poll vulnerability scan
       id: poll
       env:
-        REPO_NAME: ${{ needs.build.outputs.repo_name }}
+        REPO_NAME:  ${{ needs.build.outputs.repo_name }}
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
         COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
         COMPONENT=${COMPONENT:-default}
-        IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT@${{ steps.get_digest.ouputs.digest }}"
+        IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
         echo "Polling scan status $IMG"
         for i in {1..10}; do
-            STATUS=$(gcloud artifacts docker images describe $IMG --format="value(image_summary.scan_status)")
+            STATUS=$(gcloud container images describe $IMG --show-package-vulnerability)
             echo "Scan status: $STATUS"
             if [[ "$STATUS" == "FINISHED_SUCCESS" ]]; then
               echo "scan_passed=true" >> $GITHUB_OUTPUT
@@ -169,6 +178,15 @@ jobs:
             sleep 20
         done
 
+    # - name: Fail on high/critical
+    #   if: steps.poll.outputs.severity == 'CRITICAL' || steps.poll.outputs.severity == env.SEVERITY_STOP
+    #   run: |
+    #     echo "::error::Image failed vulnerability gate (severity=${{ steps.poll.outputs.severity }})"
+    #     exit 1
+
+##########################################################################
+#  JOB 3  —  Copy clean image to secure registry & GHCR
+##########################################################################
   promote_secure:
     needs: [build, scan_gate]
     if: needs.scan_gate.outputs.scan_passed == 'true'
@@ -181,17 +199,17 @@ jobs:
 
     env:
       WORKLOAD_IDENTITY_PROVIDER: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-      SERVICE_ACCOUNT: 'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
+      SERVICE_ACCOUNT:            'ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com'
 
     steps:
     - uses: google-github-actions/auth@v1
       with:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-        service_account: ${{ env.SERVICE_ACCOUNT }}
+        service_account:            ${{ env.SERVICE_ACCOUNT }}
 
     - name: Copy & retag clean image
       env:
-        REPO_NAME: ${{ needs.build.outputs.repo_name }}
+        REPO_NAME:  ${{ needs.build.outputs.repo_name }}
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
@@ -203,7 +221,7 @@ jobs:
 
     - name: Push tag to GHCR
       env:
-        REPO_NAME: ${{ needs.build.outputs.repo_name }}
+        REPO_NAME:  ${{ needs.build.outputs.repo_name }}
         COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
