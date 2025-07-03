@@ -152,11 +152,6 @@ jobs:
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v1
 
-    - name: Install required gcloud components
-      run: |
-        gcloud components update
-        gcloud components install container-analysis
-
     - name: Poll vulnerability scan
       id: poll
       env:
