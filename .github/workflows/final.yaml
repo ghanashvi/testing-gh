@@ -15,6 +15,7 @@ env:
   # ── Artifact Registry paths
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
+  GAR_LOCATION:          us
   GAR_REGION:            us-central1
 
   # ── Scan polling settings (6 min total)
@@ -164,7 +165,7 @@ jobs:
           echo "Attempt $i of ${MAX_ATTEMPTS}"
           
           # Initiate a new scan
-          gcloud artifacts docker images scan "$IMG" --location=$GAR_REGION
+          gcloud artifacts docker images scan "$IMG" --location=$GAR_LOCATION
 
           # Get the scan results
           RESULT=$(gcloud artifacts docker images list-vulnerabilities "$IMG" \
