@@ -13,74 +13,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      built_images: ${{ steps.collect.outputs.images_json }}
-      repo_name:    ${{ steps.clone_repo.outputs.REPO_NAME }}
-      commit_tag:   ${{ github.event.client_payload.sha }}
-    steps:
-    - uses: actions/checkout@v3
-    - name: Clone Source Repository
-      id: clone_repo
-      run: |
-        REPO_FULL="${{ github.event.client_payload.repository }}"
-        REPO_NAME=$(echo "$REPO_FULL" | cut -d'/' -f2)
-        git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO_FULL.git "$REPO_NAME"
-        cd "$REPO_NAME"
-        git checkout "${{ github.event.client_payload.sha }}"
-        echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
-    - name: Detect Changed Docker Components
-      id: diff
-      uses: tj-actions/changed-files@v46
-      with:
-        token: ${{ github.token }}
-        path:     ${{ steps.clone_repo.outputs.REPO_NAME }}
-        files: |
-          **/Dockerfile
-          **/Dockerfile.*
-          **/Dockerfile-*
-          **/*.py
-    - uses: google-github-actions/auth@v1
-      with:
-        workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-        service_account:            ${{ env.SERVICE_ACCOUNT }}
-    - uses: docker/setup-buildx-action@v2
-    - name: Configure Docker for GAR
-      run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
-    - name: Build and push images
-      run: |
-        set -e
-        REPO_NAME="${{ steps.clone_repo.outputs.REPO_NAME }}"
-        COMMIT_TAG="${{ github.event.client_payload.sha }}"
-        cd "$REPO_NAME"
-        : > /tmp/built_images.txt
-        CHANGED_FILES="${{ steps.diff.outputs.all_changed_files }}"
-        TARGET_DOCKERFILES=$(echo "$CHANGED_FILES" | grep -E 'Dockerfile.*')
-        for DOCKERFILE in $TARGET_DOCKERFILES; do
-          [ -z "$DOCKERFILE" ] && continue
-          DIR=$(dirname "$DOCKERFILE")
-          COMPONENT=$(basename "$DOCKERFILE" | sed -E 's/^Dockerfile[-\.]?//')
-          COMPONENT=${COMPONENT:-default}
-          IMAGE_TAG="$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
-          FULL="$QUAR_IMAGE_REGISTRY/$IMAGE_TAG"
-          echo "::group::Building $FULL"
-          docker build -f "$DOCKERFILE" -t "$FULL" "$DIR"
-          docker push "$FULL"
-          echo "::endgroup::"
-          echo "$FULL" >> /tmp/built_images.txt
-        done
-    - name: Collect built images
-      id: collect
-      run: |
-        if [ -s /tmp/built_images.txt ]; then
-          jq -Rsc 'split("\n")[:-1]' /tmp/built_images.txt > /tmp/list.json
-          echo "images_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
-        else
-          echo "images_json=[]" >> "$GITHUB_OUTPUT"
-        fi
+    # ... (keep the build job as is)
 
   scan_gate:
     needs: build
@@ -91,6 +24,8 @@ jobs:
     strategy:
       matrix:
         image: ${{ fromJson(needs.build.outputs.built_images) }}
+    outputs:
+      scan_result: ${{ steps.scan.outputs.result }}
     steps:
     - uses: actions/checkout@v3
     - uses: google-github-actions/auth@v1
@@ -109,15 +44,28 @@ jobs:
           SCAN_RESULT=$(gcloud artifacts docker images describe "$IMG" --show-package-vulnerability --format=json)
           
           if [[ -n "$SCAN_RESULT" ]]; then
-            VULNERABILITIES=$(echo "$SCAN_RESULT" | jq -r '.vulnz[]')
+            DISCOVERY_STATUS=$(echo "$SCAN_RESULT" | jq -r '.discovery_summary.discovery[0].discovery.analysisStatus')
             
-            if [[ -n "$VULNERABILITIES" ]]; then
-              echo "::error::Vulnerabilities detected:"
-              echo "$VULNERABILITIES" | jq '.'
+            if [[ "$DISCOVERY_STATUS" == "FINISHED_SUCCESS" ]]; then
+              VULNERABILITIES=$(echo "$SCAN_RESULT" | jq -r '.vulnerability_summary.vulnerabilities')
+              
+              if [[ -n "$VULNERABILITIES" && "$VULNERABILITIES" != "null" ]]; then
+                echo "::error::Vulnerabilities detected:"
+                echo "$VULNERABILITIES" | jq '.'
+                echo "result=failure" >> $GITHUB_OUTPUT
+                exit 1
+              else
+                echo "No vulnerabilities found"
+                echo "result=success" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            elif [[ "$DISCOVERY_STATUS" == "FINISHED_FAILED" ]]; then
+              echo "::error::Scan failed to complete successfully"
+              echo "result=failure" >> $GITHUB_OUTPUT
               exit 1
             else
-              echo "No vulnerabilities found"
-              exit 0
+              echo "Scan still in progress. Waiting..."
+              sleep 10
             fi
           else
             echo "Scan still in progress or no results available. Waiting..."
@@ -126,11 +74,12 @@ jobs:
         done
 
         echo "::error::Scan did not complete within the allocated time"
+        echo "result=failure" >> $GITHUB_OUTPUT
         exit 1
 
   promote_secure:
     needs: [build, scan_gate]
-    if: needs.build.outputs.built_images != '[]' && needs.scan_gate.result == 'success'
+    if: needs.build.outputs.built_images != '[]' && needs.scan_gate.result == 'success' && needs.scan_gate.outputs.scan_result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
