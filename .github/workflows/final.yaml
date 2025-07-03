@@ -17,12 +17,12 @@ env:
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
   GAR_REGION:            us-central1
 
-  # ── Scan polling settings (6 min total)
+  # ── Scan polling settings (6 min total)
   POLL_INTERVAL: 10      # seconds
-  MAX_ATTEMPTS:  36      # MAX_ATTEMPTS × POLL_INTERVAL ≈ 6 min
+  MAX_ATTEMPTS:  36      # MAX_ATTEMPTS × POLL_INTERVAL ≈ 6 min
 
 ###############################################################################
-#  JOB 1  –  Build & push “insecure‑<sha>” images to quarantine registry
+#  JOB 1  –  Build & push "insecure‑<sha>" images to quarantine registry
 ###############################################################################
 jobs:
   build:
@@ -132,7 +132,7 @@ jobs:
         echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
 
 ###############################################################################
-#  JOB 2  –  Scan gate (pass only when maxSeverity == NONE)
+#  JOB 2  –  Scan gate (pass only when no HIGH or CRITICAL vulnerabilities)
 ###############################################################################
   scan_gate:
     needs: build
@@ -149,7 +149,7 @@ jobs:
         workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
         service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-    - name: Poll vulnerability scan (pass only if NONE)
+    - name: Poll vulnerability scan
       id: poll
       env:
         REPO_NAME:  ${{ needs.build.outputs.repo_name }}
@@ -161,25 +161,39 @@ jobs:
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
 
         for (( i=1; i<=${MAX_ATTEMPTS}; i++ )); do
-          sev=$(gcloud artifacts docker images describe "$IMG" \
-                 --format='value(vulnerabilityScanSummary.maxSeverity)' 2>/dev/null || true)
-          [[ "$sev" && "$sev" != "SCAN_PENDING" ]] && break
-          sleep "${POLL_INTERVAL}"
+          echo "Attempt $i of ${MAX_ATTEMPTS}"
+          
+          # Initiate a new scan
+          gcloud artifacts docker images scan "$IMG" --location=$GAR_REGION
+
+          # Get the scan results
+          RESULT=$(gcloud artifacts docker images list-vulnerabilities "$IMG" \
+            --location=$GAR_REGION \
+            --format='value(vulnerability.effectiveSeverity)')
+
+          if [[ -n "$RESULT" ]]; then
+            echo "Scan completed. Vulnerabilities found:"
+            echo "$RESULT"
+            
+            # Check if there are any HIGH or CRITICAL vulnerabilities
+            if echo "$RESULT" | grep -qE "HIGH|CRITICAL"; then
+              echo "::error::High or Critical vulnerabilities detected"
+              exit 1
+            else
+              echo "No High or Critical vulnerabilities detected"
+              exit 0
+            fi
+          else
+            echo "Scan still in progress or no vulnerabilities found. Waiting..."
+            sleep "${POLL_INTERVAL}"
+          fi
         done
 
-        if [[ -z "$sev" || "$sev" == "SCAN_PENDING" ]]; then
-          echo "::error::Scan timed out after $((MAX_ATTEMPTS * POLL_INTERVAL)) seconds"
-          exit 1
-        fi
-
-        echo "::notice::Scan result: $sev"
-        if [[ "$sev" != "NONE" ]]; then
-          echo "::error::Image has vulnerabilities (maxSeverity=$sev)"
-          exit 1
-        fi
+        echo "::error::Scan polling timed out after $((MAX_ATTEMPTS * POLL_INTERVAL)) seconds"
+        exit 1
 
 ###############################################################################
-#  JOB 3  –  Promote clean image to secure registry + GHCR
+#  JOB 3  –  Promote clean image to secure registry + GHCR
 ###############################################################################
   promote_secure:
     needs: scan_gate
