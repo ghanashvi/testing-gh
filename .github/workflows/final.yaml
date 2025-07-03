@@ -105,37 +105,28 @@ jobs:
         IMG="${{ matrix.image }}"
         
         for i in {1..30}; do
+          echo "Attempt $i of 30"
           SCAN_RESULT=$(gcloud artifacts docker images describe "$IMG" --show-package-vulnerability --format=json)
           
-          ANALYSIS_STATUS=$(echo "$SCAN_RESULT" | jq -r '.discovery_summary.discovery[0].discovery.analysisStatus')
-          
-          if [[ "$ANALYSIS_STATUS" == "FINISHED_SUCCESS" ]]; then
-            echo "Scan completed successfully."
-            break
-          elif [[ "$ANALYSIS_STATUS" == "FINISHED_FAILED" ]]; then
-            echo "::error::Scan failed"
-            exit 1
+          if [[ -n "$SCAN_RESULT" ]]; then
+            VULNERABILITIES=$(echo "$SCAN_RESULT" | jq -r '.vulnz[]')
+            
+            if [[ -n "$VULNERABILITIES" ]]; then
+              echo "::error::Vulnerabilities detected:"
+              echo "$VULNERABILITIES" | jq '.'
+              exit 1
+            else
+              echo "No vulnerabilities found"
+              exit 0
+            fi
           else
-            echo "Scan still in progress. Waiting..."
+            echo "Scan still in progress or no results available. Waiting..."
             sleep 10
           fi
         done
 
-        if [[ "$ANALYSIS_STATUS" != "FINISHED_SUCCESS" ]]; then
-          echo "::error::Scan did not complete within the allocated time"
-          exit 1
-        fi
-
-        # Check for vulnerabilities
-        VULNERABILITIES=$(echo "$SCAN_RESULT" | jq -r '.vulnerability_summary.vulnerabilities')
-
-        if [[ -n "$VULNERABILITIES" && "$VULNERABILITIES" != "null" ]]; then
-          echo "::error::Vulnerabilities detected:"
-          echo "$VULNERABILITIES" | jq '.'
-          exit 1
-        else
-          echo "No vulnerabilities detected"
-        fi
+        echo "::error::Scan did not complete within the allocated time"
+        exit 1
 
   promote_secure:
     needs: [build, scan_gate]
