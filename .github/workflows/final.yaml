@@ -17,10 +17,6 @@ env:
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
   GAR_LOCATION:          us-central1
 
-  # ── Scan polling settings (6 min total)
-  POLL_INTERVAL: 10      # seconds
-  MAX_ATTEMPTS:  36      # MAX_ATTEMPTS × POLL_INTERVAL ≈ 6 min
-
 ###############################################################################
 #  JOB 1  –  Build & push "insecure‑<sha>" images to quarantine registry
 ###############################################################################
@@ -152,7 +148,7 @@ jobs:
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v1
 
-    - name: Scan and check for vulnerabilities
+    - name: Check for vulnerabilities
       id: scan
       env:
         REPO_NAME:  ${{ needs.build.outputs.repo_name }}
@@ -160,46 +156,33 @@ jobs:
         DOCKERFILE: ${{ matrix.dockerfile }}
       run: |
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME:insecure-$COMMIT_TAG"
-
-        # Initiate a new scan with --quiet flag
-        SCAN_RESULT=$(gcloud artifacts docker images scan "$IMG" --location=us --format="value(response.scan)" --quiet)
         
-        if [[ -z "$SCAN_RESULT" ]]; then
-          echo "::error::Failed to initiate scan for $IMG"
+        # Get the latest scan ID for the image
+        SCAN_ID=$(gcloud artifacts docker images describe "$IMG" --location=$GAR_LOCATION --format='value(related_artifacts.occurrences.resourceUri)' | grep "^projects" | head -1)
+
+        if [[ -z "$SCAN_ID" ]]; then
+          echo "::error::No scan found for $IMG"
           exit 1
         fi
 
-        echo "Scan initiated. Scan ID: $SCAN_RESULT"
+        echo "Using Scan ID: $SCAN_ID"
 
-        # Poll for scan results
-        for (( i=1; i<=${MAX_ATTEMPTS}; i++ )); do
-          echo "Attempt $i of ${MAX_ATTEMPTS}"
+        # Get the scan results
+        VULNERABILITIES=$(gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
+          --location=us \
+          --format='table(name.basename(), vulnerability.effectiveSeverity, vulnerability.shortDescription)')
 
-          # Get the scan results
-          VULNERABILITIES=$(gcloud artifacts docker images list-vulnerabilities "$SCAN_RESULT" \
-            --location=us \
-            --format='table(name.basename(), vulnerability.effectiveSeverity, vulnerability.shortDescription)')
-
-          if [[ -n "$VULNERABILITIES" ]]; then
-            echo "Scan completed. Vulnerabilities found:"
-            echo "$VULNERABILITIES"
-            
-            # Check if there are any vulnerabilities (excluding the header row)
-            if [[ $(echo "$VULNERABILITIES" | wc -l) -gt 1 ]]; then
-              echo "::error::Vulnerabilities detected"
-              exit 1
-            else
-              echo "No vulnerabilities detected"
-              exit 0
-            fi
-          else
-            echo "Scan still in progress. Waiting..."
-            sleep "${POLL_INTERVAL}"
-          fi
-        done
-
-        echo "::error::Scan polling timed out after $((MAX_ATTEMPTS * POLL_INTERVAL)) seconds"
-        exit 1
+        echo "Scan results:"
+        echo "$VULNERABILITIES"
+        
+        # Check if there are any vulnerabilities (excluding the header row)
+        if [[ $(echo "$VULNERABILITIES" | wc -l) -gt 1 ]]; then
+          echo "::error::Vulnerabilities detected"
+          exit 1
+        else
+          echo "No vulnerabilities detected"
+          exit 0
+        fi
 
 ###############################################################################
 #  JOB 3  –  Promote clean image to secure registry + GHCR
