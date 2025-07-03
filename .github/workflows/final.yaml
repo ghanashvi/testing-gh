@@ -13,7 +13,7 @@ env:
   GAR_REGION:            us-central1
 
 ##########################################################################
-#  JOB 1  —  Build & push "insecure-<sha>" images to QUAR registry
+#  JOB 1  —  Build & push "insecure-<sha>" images to QUAR registry
 ##########################################################################
 jobs:
   build:
@@ -129,7 +129,7 @@ jobs:
         echo "dockerfiles_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
 
 ##########################################################################
-#  JOB 2  —  Wait for GAR auto‑scan, fail on HIGH / CRITICAL
+#  JOB 2  —  Wait for GAR auto‑scan, fail on HIGH / CRITICAL
 ##########################################################################
   scan_gate:
     needs: build
@@ -139,6 +139,9 @@ jobs:
     strategy:
       matrix:
         dockerfile: ${{ fromJson(needs.build.outputs.built_dockerfiles) }}
+    
+    outputs:
+      scan_passed: ${{ steps.poll.outputs.scan_passed }}
 
     env:
       SEVERITY_STOP: HIGH
@@ -162,29 +165,18 @@ jobs:
         COMPONENT=${COMPONENT:-default}
         IMG="$QUAR_IMAGE_REGISTRY/$REPO_NAME-$COMPONENT:insecure-$COMMIT_TAG"
         echo "Polling scan status $IMG"
-        # for i in {1..40}; do
-        #   sev=$(gcloud artifacts docker images describe "$IMG" \
-        #          --format='value(vulnerabilityScanSummary.maxSeverity)' 2>/dev/null || true)
-        #   [[ "$sev" && "$sev" != "SCAN_PENDING" ]] && break
-        #   sleep 15
-        # done
-
-        # [[ -z "$sev" || "$sev" == "SCAN_PENDING" ]] && { echo "::error::Scan timeout"; exit 1; }
-        # echo "severity=$sev" >> "$GITHUB_OUTPUT"
-
         for i in {1..10}; do
             STATUS=$(gcloud container images describe $IMG --format="value(image_summary.scan_status)")
             echo "Scan status: $STATUS"
             if [[ "$STATUS" == "FINISHED_SUCCESS" ]]; then
-              echo "SCAN_PASSED=true" >> $GITHUB_ENV
+              echo "scan_passed=true" >> $GITHUB_OUTPUT
               break
             elif [[ "$STATUS" == "FAILED" || "$STATUS" == "FINISHED_FAILED" ]]; then
-              echo "SCAN_PASSED=false" >> $GITHUB_ENV
+              echo "scan_passed=false" >> $GITHUB_OUTPUT
               break
             fi
             sleep 20
         done
- 
 
     # - name: Fail on high/critical
     #   if: steps.poll.outputs.severity == 'CRITICAL' || steps.poll.outputs.severity == env.SEVERITY_STOP
@@ -193,11 +185,11 @@ jobs:
     #     exit 1
 
 ##########################################################################
-#  JOB 3  —  Copy clean image to secure registry & GHCR
+#  JOB 3  —  Copy clean image to secure registry & GHCR
 ##########################################################################
   promote_secure:
-    needs: scan_gate
-    if: env.SCAN_PASSED == 'true'
+    needs: [build, scan_gate]
+    if: needs.scan_gate.outputs.scan_passed == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
