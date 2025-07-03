@@ -173,7 +173,7 @@ jobs:
           echo "Attempt $i of ${MAX_ATTEMPTS}"
           
           # Initiate a new scan
-          gcloud artifacts docker images scan "$IMG" --location=$GAR_LOCATION
+          gcloud artifacts docker images scan "$IMG" --location=$GAR_LOCATION --remote
 
           # Get the scan results
           RESULT=$(gcloud artifacts docker images list-vulnerabilities "$IMG" \
