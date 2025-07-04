@@ -146,6 +146,7 @@ jobs:
               set -e
               SCAN_ID=\$(gcloud artifacts docker images scan \"$IMG\" \
                           --location='$ODS_LOCATION' --quiet \
+                          --remote \
                           --format='value(response.scan)')
               for i in \$(seq 1 $MAX_ATTEMPTS); do
                 ROWS=\$(gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
