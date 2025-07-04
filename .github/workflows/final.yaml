@@ -1,5 +1,5 @@
 ###############################################################################
-# Workflow: Build ➜ Per‑image Scan & Promote
+# Workflow: Build ➜ Scan ➜ Promote  (independent per Dockerfile)
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -16,165 +16,164 @@ env:
 
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_LOCATION:          us-central1            # docker login host
+  GAR_LOCATION:          us-central1
 
   PROJECT_ID: axial-edition-463510-p5
-  LOCATION:   us-central1                      # Container Analysis location
+  LOCATION:   us-central1            # Container‑Analysis API region
 
 ###############################################################################
-# Job 1: Build and push changed Dockerfiles
+# Job 1 : Detect every changed Dockerfile          (quick, single runner)
 ###############################################################################
 jobs:
-  build:
+  detect_files:
     runs-on: ubuntu-latest
-    permissions: { contents: read, id-token: write }
+    permissions: { contents: read }
 
     outputs:
-      built_images: ${{ steps.collect.outputs.images_json }}
-      commit_tag:   ${{ github.event.client_payload.sha }}
+      files:      ${{ steps.changed.outputs.all }}
+      commit_sha: ${{ github.event.client_payload.sha }}
+      repo_full:  ${{ github.event.client_payload.repository }}
 
     steps:
-      - uses: actions/checkout@v3                       # orchestration repo
+      - uses: actions/checkout@v3        # orchestration repo
 
-      - id: clone_repo                                  # clone application
+      # clone the app repo at the target SHA
+      - id: clone
         run: |
-          REPO_FULL="${{ github.event.client_payload.repository }}"
-          REPO_NAME="${REPO_FULL#*/}"
-          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO_FULL "$REPO_NAME"
-          cd "$REPO_NAME"
+          REPO="${{ github.event.client_payload.repository }}"
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO app
+          cd app
           git checkout "${{ github.event.client_payload.sha }}"
-          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
-      - id: base                                        # resolve base SHA
+      # base SHA = previous commit if exists, else empty tree
+      - id: base
         run: |
-          cd "${{ steps.clone_repo.outputs.REPO_NAME }}"
+          cd app
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            echo "sha=$(git rev-parse HEAD~1)" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD~1)" >>"$GITHUB_OUTPUT"
           else
-            echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >> "$GITHUB_OUTPUT"
+            echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >>"$GITHUB_OUTPUT"
           fi
 
-      - id: diff                                        # changed Dockerfiles
+      # list changed Dockerfiles
+      - id: changed
         uses: tj-actions/changed-files@v46
         with:
-          token: ${{ github.token }}
-          path: ${{ steps.clone_repo.outputs.REPO_NAME }}
+          path:   app
           base_sha: ${{ steps.base.outputs.sha }}
           sha:      ${{ github.event.client_payload.sha }}
-          use_rest_api: false
           files: |
             **/Dockerfile*
-
-      - uses: google-github-actions/auth@v1             # workload‑identity
-        with:
-          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account:            ${{ env.SERVICE_ACCOUNT }}
-
-      - uses: docker/setup-buildx-action@v2             # buildx
-
-      - name: Docker login to quarantine registry
-        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
-
-      - name: Build and push images                     # push insecure‑<sha>
+      - id: collect
         run: |
-          set -e
-          REPO="$(basename "${{ steps.clone_repo.outputs.REPO_NAME }}")"
-          SHA="${{ github.event.client_payload.sha }}"
-          cd "$REPO"
-          > /tmp/built.txt
-          for FILE in ${{ steps.diff.outputs.all_changed_files }}; do
-            [[ "$FILE" != *Dockerfile* ]] && continue
-            DIR=$(dirname "$FILE")
-            COMP=$(basename "$FILE" | sed -E 's/^Dockerfile[-\.]?//')
-            COMP=${COMP:-default}
-            IMAGE="$QUAR_IMAGE_REGISTRY/$REPO-$COMP:insecure-$SHA"
-            docker build -f "$FILE" -t "$IMAGE" "$DIR"
-            docker push "$IMAGE"
-            echo "$IMAGE" >> /tmp/built.txt
-          done
-
-      - id: collect                                     # images_json output
-        run: |
-          if [ -s /tmp/built.txt ]; then
-            jq -Rsc 'split("\n")[:-1]' /tmp/built.txt > /tmp/list.json
-            echo "images_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
-          else
-            echo "images_json=[]" >> "$GITHUB_OUTPUT"
-          fi
+          jq -Rsc 'split("\n")[:-1]' <<<"${{ steps.changed.outputs.all_changed_files }}" \
+            >files.json
+          echo "all=$(cat files.json)" >>"$GITHUB_OUTPUT"
 
 ###############################################################################
-# Job 2: Scan each image and promote only when clean
+# Job 2 : For each Dockerfile, build → scan → promote          (matrix)
 ###############################################################################
-  scan_and_promote:
-    needs: build
-    if: needs.build.outputs.built_images != '[]'
+  process_image:
+    needs: detect_files
+    if: needs.detect_files.outputs.files != '[]'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       packages: write
     strategy:
-      fail-fast: false                                   # allow parallel runs
+      fail-fast: false                 # allow parallel success even with failures
       matrix:
-        image: ${{ fromJson(needs.build.outputs.built_images) }}
+        file: ${{ fromJson(needs.detect_files.outputs.files) }}
+
+    env:
+      COMMIT_SHA: ${{ needs.detect_files.outputs.commit_sha }}
+      REPO_FULL:  ${{ needs.detect_files.outputs.repo_full }}
 
     steps:
-      - uses: actions/checkout@v3                       # workspace
+      - uses: actions/checkout@v3      # orchestration repo
 
-      - uses: google-github-actions/auth@v1             # workload‑identity
+      # GCP auth (Workload‑Identity Federation)
+      - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      # --- SCAN STEP --------------------------------------------------------
-      - id: scan
-        name: Container Analysis vulnerabilitySummary
-        continue-on-error: true                         # keep job alive
+      - uses: docker/setup-buildx-action@v2
+      - uses: google-github-actions/setup-gcloud@v1
+
+      - name: Docker login (quarantine)
+        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
+
+      # clone the same repo & checkout required commit
+      - name: Checkout application repository
+        run: |
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO_FULL app
+          cd app
+          git checkout "$COMMIT_SHA"
+
+      # Build and push the image for this Dockerfile
+      - id: build
+        name: Build & push
         env:
-          IMG: ${{ matrix.image }}
+          FILE: ${{ matrix.file }}
+        run: |
+          set -e
+          cd app
+          DIR=$(dirname "$FILE")
+          COMP=$(basename "$FILE" | sed -E 's/^Dockerfile[-\.]?//')
+          COMP=${COMP:-default}
+          IMAGE="${{ env.QUAR_IMAGE_REGISTRY }}/$(basename "$(pwd)")-$COMP:insecure-$COMMIT_SHA"
+          docker build -f "$FILE" -t "$IMAGE" "$DIR"
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >>"$GITHUB_OUTPUT"
+
+      # Scan with vulnerabilitySummary – continue‑on‑error so job continues
+      - id: scan
+        name: Container‑Analysis scan
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
         run: |
           set -e
           TOKEN=$(gcloud auth print-access-token)
-
-          # obtain digest
-          DIGEST=$(gcloud artifacts docker images describe "$IMG" \
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE" \
                      --format='value(image_summary.digest)')
-          [ -z "$DIGEST" ] && { echo "Digest not found"; exit 1; }
-
-          BASE_NO_TAG=${IMG%%:*}
+          BASE_NO_TAG=${IMAGE%%:*}
           RESOURCE_URL="https://${BASE_NO_TAG}@${DIGEST}"
-
           API="https://containeranalysis.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/occurrences:vulnerabilitySummary"
           SUMMARY=$(curl -s -H "Authorization: Bearer $TOKEN" \
             "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
-
           TOTAL=$(echo "$SUMMARY" | jq '[(.counts // [])[] .totalCount | tonumber] | add')
-          ([ "$TOTAL" -eq 0 ] && echo "pass=true"  >> "$GITHUB_OUTPUT") || \
-          (echo "pass=false" >> "$GITHUB_OUTPUT")
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "Vulnerabilities found:"
+            echo "$SUMMARY" | jq '.counts'
+            exit 1
+          fi
+          echo "Image clean."
 
-      # --- PROMOTE only when scan passed ------------------------------------
-      - name: Docker login secure registry
-        if: steps.scan.outputs.pass == 'true'
+      # Promote only if scan step succeeded
+      - name: Docker login (secure)
+        if: steps.scan.outcome == 'success'
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
       - id: promote
-        if: steps.scan.outputs.pass == 'true'
-        name: Copy image to secure registry
+        if: steps.scan.outcome == 'success'
+        name: Copy to secure registry
         env:
-          QUAR:   ${{ env.QUAR_IMAGE_REGISTRY }}
-          SECURE: ${{ env.SECURE_IMAGE_REGISTRY }}
+          SRC: ${{ steps.build.outputs.image }}
         run: |
-          SRC="${{ matrix.image }}"
-          DST=$(echo "$SRC" | sed "s|$QUAR|$SECURE|" | sed "s/:insecure-/:secure-/")
+          DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" \
+                             | sed "s/:insecure-/:secure-/")
           docker pull "$SRC"
           docker tag  "$SRC" "$DST"
           docker push "$DST"
-          echo "dst=$DST" >> "$GITHUB_OUTPUT"
+          echo "dst=$DST" >>"$GITHUB_OUTPUT"
 
-      - name: Push tag to GHCR
-        if: steps.scan.outputs.pass == 'true'
+      - name: Push to GHCR
+        if: steps.scan.outcome == 'success'
         env:
-          COMMIT_SHA: ${{ needs.build.outputs.commit_tag }}
           DST:        ${{ steps.promote.outputs.dst }}
+          COMMIT_SHA: ${{ env.COMMIT_SHA }}
         run: |
           COMPONENT=$(basename "$DST" | cut -d':' -f1)
           GHCR="ghcr.io/${{ github.repository_owner }}/$COMPONENT:secure-$COMMIT_SHA"
@@ -182,7 +181,7 @@ jobs:
           docker tag "$DST" "$GHCR"
           docker push "$GHCR"
 
-      # Fail this matrix run when vulnerabilities exist
-      - name: Mark failure if scan failed
-        if: steps.scan.outputs.pass != 'true'
+      # Mark this matrix run failed when vulnerabilities exist
+      - name: Fail run if scan failed
+        if: steps.scan.outcome == 'failure'
         run: exit 1
