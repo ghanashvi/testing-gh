@@ -1,5 +1,5 @@
 ################################################################################
-# Workflow: Build ➜ On‑Demand Scan (fail on ANY vuln) ➜ Promote
+# Workflow : Build ➜ On‑Demand Scan (fail on ANY vulnerability) ➜ Promote
 ################################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -8,7 +8,7 @@ on:
     types: [app-code-change]
 
 ###############################################################################
-# ------------------------------  Global ENV  ---------------------------------
+# ----------------------  Project‑wide environment variables  -----------------
 ###############################################################################
 env:
   WORKLOAD_IDENTITY_PROVIDER: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
@@ -16,14 +16,14 @@ env:
 
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_LOCATION:          us-central1          # docker login region
-  ODS_LOCATION:          us                  # On‑Demand Scan region
+  GAR_LOCATION:          us-central1          # docker login host/region
+  ODS_LOCATION:          us                  # On‑Demand Scanning region
 
-  POLL_INTERVAL: 10
-  MAX_ATTEMPTS:  36       # 6 min
+  POLL_INTERVAL: 10      # seconds between scan‑poll rounds
+  MAX_ATTEMPTS:  36      # 36 × 10 s ≈ 6 min
 
 ###############################################################################
-# JOB 1 : Build & push changed Dockerfiles to *quarantine*
+# JOB 1 ─ Build & push changed Dockerfiles (unchanged except “fi” fix)
 ###############################################################################
 jobs:
   build:
@@ -36,7 +36,7 @@ jobs:
       commit_tag:   ${{ github.event.client_payload.sha }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v3           # orchestration repo
 
       - name: Clone Source Repository
         id: clone_repo
@@ -94,12 +94,13 @@ jobs:
             COMP=${COMP:-default}
             TAG="$REPO-$COMP:insecure-$SHA"
             FULL="$QUAR_IMAGE_REGISTRY/$TAG"
+            echo "::group::Building $FULL"
             docker build -f "$FILE" -t "$FULL" "$DIR"
             docker push "$FULL"
+            echo "::endgroup::"
             echo "$FULL" >> /tmp/built.txt
           done
 
-      # 🔧 FIX: closing `fi` added
       - id: collect
         name: Collect built images
         run: |
@@ -111,7 +112,7 @@ jobs:
           fi
 
 ###############################################################################
-# JOB 2 : On‑Demand Scan – fail on ANY vulnerability row
+# JOB 2 ─ On‑Demand Scan (fail on *any* vulnerability row)
 ###############################################################################
   ods_scan:
     needs: build
@@ -123,13 +124,16 @@ jobs:
         image: ${{ fromJson(needs.build.outputs.built_images) }}
 
     steps:
-      - uses: actions/checkout@v3  # workspace for creds mount
+      # Workspace required for credentials file mount
+      - uses: actions/checkout@v3
 
+      # Authenticate (Workload‑Identity Federation)
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
+      # Run scan inside Cloud‑SDK container with ADC creds
       - name: On‑Demand Scan & gate
         env:
           IMG:            ${{ matrix.image }}
@@ -141,25 +145,26 @@ jobs:
         run: |
           docker run --rm \
             -e CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
+            -e GOOGLE_APPLICATION_CREDENTIALS=/creds.json \
+            -e CLOUDSDK_CORE_PROJECT=$PROJECT_ID \
             -v "$CREDS":/creds.json:ro \
             google/cloud-sdk:latest /bin/bash -c "
               set -e
-              gcloud auth activate-service-account --key-file=/creds.json
-              gcloud config set project '$PROJECT_ID'
+              gcloud auth login --quiet --cred-file=/creds.json --brief
 
-              echo '🔍  Scanning image: $IMG'
+              echo '🔍  Scanning $IMG'
               SCAN_ID=\$(gcloud artifacts docker images scan \"$IMG\" \
                           --location='$ODS_LOCATION' \
                           --remote \
                           --quiet \
                           --format='value(response.scan)')
-              echo 'Scan ID :' \$SCAN_ID
+              echo 'Scan ID:' \$SCAN_ID
 
               for i in \$(seq 1 $MAX_ATTEMPTS); do
-                CNT=\$(gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
-                         --location='$ODS_LOCATION' \
-                         --format='value(name)' | wc -l)
-                if [ \"\$CNT\" -gt 0 ]; then
+                COUNT=\$(gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
+                          --location='$ODS_LOCATION' \
+                          --format='value(name)' | wc -l)
+                if [ \"\$COUNT\" -gt 0 ]; then
                   echo '❌  Vulnerabilities detected'
                   gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
                     --location='$ODS_LOCATION' \
@@ -169,12 +174,11 @@ jobs:
                 echo '⏳  Waiting for results… ('\$i')'
                 sleep $POLL_INTERVAL
               done
-
-              echo '✅  Scan clean (no vulnerabilities)'
+              echo '✅  No vulnerabilities found'
             "
 
 ###############################################################################
-# JOB 3 : Promote (runs only if ods_scan succeeded)
+# JOB 3 ─ Promote clean images to secure repo + GHCR
 ###############################################################################
   promote_secure:
     needs: [build, ods_scan]
@@ -205,7 +209,7 @@ jobs:
           gcloud artifacts docker images copy "$SRC" --destination="$DST" --quiet
           echo "dst=$DST" >> "$GITHUB_OUTPUT"
 
-      - name: Push same digest/tag to GHCR
+      - name: Push tag to GHCR
         env:
           COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
           DST:        ${{ steps.copy.outputs.dst }}
