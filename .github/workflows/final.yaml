@@ -1,6 +1,6 @@
 ###############################################################################
 # Workflow: Build ➜ Container‑Analysis Scan ➜ Promote
-# Goal     : Push only images with zero vulnerabilities to the secure registry
+# Purpose : Push only images with zero vulnerabilities to the secure registry
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -17,9 +17,10 @@ env:
 
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_LOCATION:          us-central1
-  PROJECT_ID:            axial-edition-463510-p5        # used by REST call
-  REGION:                us-central1                    # registry / API region
+  GAR_LOCATION:          us-central1            # docker login host
+
+  PROJECT_ID:            axial-edition-463510-p5
+  LOCATION:              us-central1           # Container Analysis location
 
 ###############################################################################
 # Job 1: Build and push changed Dockerfiles to the quarantine registry
@@ -65,10 +66,10 @@ jobs:
         name: Detect changed Dockerfiles
         uses: tj-actions/changed-files@v46
         with:
-          token: ${{ github.token }}
-          path: ${{ steps.clone_repo.outputs.REPO_NAME }}
-          base_sha: ${{ steps.base.outputs.sha }}
-          sha:      ${{ github.event.client_payload.sha }}
+          token:     ${{ github.token }}
+          path:      ${{ steps.clone_repo.outputs.REPO_NAME }}
+          base_sha:  ${{ steps.base.outputs.sha }}
+          sha:       ${{ github.event.client_payload.sha }}
           use_rest_api: false
           files: |
             **/Dockerfile*
@@ -86,7 +87,7 @@ jobs:
       - name: Configure docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      # Build and push each changed Dockerfile
+      # Build and push each Dockerfile
       - name: Build and push images
         run: |
           set -e
@@ -106,7 +107,7 @@ jobs:
             echo "$FULL" >> /tmp/built.txt
           done
 
-      # Collect list of built images for next job
+      # Collect list of built images
       - id: collect
         name: Collect built image list
         run: |
@@ -118,7 +119,7 @@ jobs:
           fi
 
 ###############################################################################
-# Job 2: Scan images with Container‑Analysis vulnerabilitySummary API
+# Job 2: Scan images using Container Analysis vulnerabilitySummary API
 ###############################################################################
   ca_scan:
     needs: build
@@ -136,30 +137,31 @@ jobs:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      # Scan every image; fail on the first vulnerability
-      - name: Scan images via vulnerabilitySummary API
+      # Query vulnerabilitySummary for each image; fail on first vulnerability
+      - name: Scan images via Container Analysis API
         env:
           IMAGES_JSON: ${{ needs.build.outputs.built_images }}
-          PROJ:        ${{ env.PROJECT_ID }}
-          REGION:      ${{ env.REGION }}
         run: |
           set -e
           TOKEN=$(gcloud auth print-access-token)
-
           for IMG in $(echo "$IMAGES_JSON" | jq -r '.[]'); do
-            echo "Checking $IMG"
+            echo "Scanning $IMG"
 
-            # Obtain image digest from registry metadata
+            # Retrieve digest of the pushed image
             DIGEST=$(gcloud artifacts docker images describe "$IMG" \
                        --format='value(image_summary.digest)')
+            if [ -z "$DIGEST" ]; then
+              echo "Could not get digest for $IMG"
+              exit 1
+            fi
 
-            # Build resource URL for the API call
-            RESOURCE="$REGION-docker.pkg.dev/$PROJ/quarantine-repo/${IMG##*/}@$DIGEST"
+            # Build resourceUrl
+            BASE_NO_TAG=${IMG%%:*}
+            RESOURCE_URL="https://${BASE_NO_TAG}@${DIGEST}"
 
-            # Query vulnerabilitySummary endpoint
+            # Call vulnerabilitySummary REST endpoint
             SUMMARY=$(curl -s -H "Authorization: Bearer $TOKEN" \
-              "https://containeranalysis.googleapis.com/v1/projects/$PROJ/occurrences:vulnerabilitySummary\
-?filter=resourceUrl=\"$RESOURCE\"&returnPartialSuccess=true")
+              "https://containeranalysis.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/occurrences:vulnerabilitySummary?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
 
             TOTAL=$(echo "$SUMMARY" | jq '[.severityCount[].count | tonumber] | add')
 
@@ -169,9 +171,10 @@ jobs:
               exit 1
             fi
           done
+          echo "All images are clean"
 
 ###############################################################################
-# Job 3: Promote all images if the scan job succeeded
+# Job 3: Promote images if the scan job succeeded
 ###############################################################################
   promote_secure:
     needs: [build, ca_scan]
@@ -200,7 +203,7 @@ jobs:
       - name: Configure docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      # Copy digest to secure repo
+      # Copy digest to secure registry and tag
       - id: promote
         name: Copy and retag image in secure registry
         env:
@@ -208,15 +211,13 @@ jobs:
           SECURE: ${{ env.SECURE_IMAGE_REGISTRY }}
         run: |
           SRC="${{ matrix.image }}"
-          DST=$(echo "$SRC" \
-                 | sed "s|$QUAR|$SECURE|" \
-                 | sed "s/:insecure-/:secure-/")
+          DST=$(echo "$SRC" | sed "s|$QUAR|$SECURE|" | sed "s/:insecure-/:secure-/")
           docker pull "$SRC"
           docker tag  "$SRC" "$DST"
           docker push "$DST"
           echo "dst=$DST" >> "$GITHUB_OUTPUT"
 
-      # Push secure tag to GHCR
+      # Push secure tag to GitHub Container Registry
       - name: Push tag to GHCR
         env:
           COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
