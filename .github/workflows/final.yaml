@@ -33,10 +33,10 @@ jobs:
       commit_tag:   ${{ github.event.client_payload.sha }}
 
     steps:
-      # Checkout the orchestration repository (this repo)
+      # Checkout orchestration repository
       - uses: actions/checkout@v3
 
-      # Clone the application repository that triggered the event
+      # Clone the application repository at the triggering SHA
       - id: clone_repo
         name: Clone application repository
         run: |
@@ -47,7 +47,7 @@ jobs:
           git checkout "${{ github.event.client_payload.sha }}"
           echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
-      # Determine a base commit for the diff (empty tree on first run)
+      # Resolve base commit (empty tree on first run)
       - id: base
         name: Resolve base commit
         run: |
@@ -58,29 +58,29 @@ jobs:
             echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >> "$GITHUB_OUTPUT"
           fi
 
-      # Identify Dockerfiles that changed in this push
+      # Detect Dockerfiles that changed
       - id: diff
         name: Detect changed Dockerfiles
         uses: tj-actions/changed-files@v46
         with:
-          token:     ${{ github.token }}
-          path:      ${{ steps.clone_repo.outputs.REPO_NAME }}
-          base_sha:  ${{ steps.base.outputs.sha }}
-          sha:       ${{ github.event.client_payload.sha }}
+          token: ${{ github.token }}
+          path: ${{ steps.clone_repo.outputs.REPO_NAME }}
+          base_sha: ${{ steps.base.outputs.sha }}
+          sha:      ${{ github.event.client_payload.sha }}
           use_rest_api: false
           files: |
             **/Dockerfile*
 
-      # Authenticate to Google Cloud using Workload Identity Federation
+      # Authenticate to Google Cloud
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      # Set up Docker Buildx builder
+      # Set up Buildx builder
       - uses: docker/setup-buildx-action@v2
 
-      # Allow docker push to Artifact Registry
+      # Configure Docker for Artifact Registry
       - name: Configure docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
@@ -104,7 +104,7 @@ jobs:
             echo "$FULL" >> /tmp/built.txt
           done
 
-      # Save list of built images as JSON for the next job
+      # Collect built image list (fi added to close the if‑block)
       - id: collect
         name: Collect built image list
         run: |
@@ -116,64 +116,51 @@ jobs:
           fi
 
 ###############################################################################
-# Job 2: Run On‑Demand Scanning and fail on any vulnerability
+# Job 2: On‑Demand scan — fails if any image has vulnerabilities
 ###############################################################################
   ods_scan:
     needs: build
     if: needs.build.outputs.built_images != '[]'
     runs-on: ubuntu-latest
     permissions: { id-token: write }
-    strategy:
-      matrix:
-        image: ${{ fromJson(needs.build.outputs.built_images) }}
 
+    # Entire job fails on the first non‑zero exit of any step
     steps:
-      # Minimal checkout so credentials file can be written to workspace
+      # Checkout so credentials file can be created
       - uses: actions/checkout@v3
 
-      # Authenticate to Google Cloud again for this job
+      # Authenticate to Google Cloud
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      # Trigger remote scan and fail if any vulnerability rows are found
-      - name: On‑Demand Scan and gate
+      # Scan all images in one shell, fail immediately on first vuln
+      - name: Scan all images
         env:
-          IMG:            ${{ matrix.image }}
-          ODS_LOCATION:   ${{ env.ODS_LOCATION }}
-          CREDS:          ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
-          PROJECT_ID:     ${{ env.GOOGLE_CLOUD_PROJECT }}
+          IMAGES_JSON: ${{ needs.build.outputs.built_images }}
+          ODS_LOC:     ${{ env.ODS_LOCATION }}
         run: |
-          docker run --rm \
-            -e CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-            -e GOOGLE_APPLICATION_CREDENTIALS=/creds.json \
-            -e CLOUDSDK_CORE_PROJECT=$PROJECT_ID \
-            -v "$CREDS":/creds.json:ro \
-            google/cloud-sdk:latest /bin/bash -c "
-              set -e
-              gcloud auth login --quiet --cred-file=/creds.json --brief
-              SCAN_ID=\$(gcloud artifacts docker images scan \"$IMG\" \
-                          --location='$ODS_LOCATION' \
-                          --remote \
-                          --quiet \
-                          --format='value(response.scan)')
-
-              ROWS=\$(gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
-                       --location='$ODS_LOCATION' \
-                       --format='value(name)' | wc -l)
-
-              if [ \"\$ROWS\" -gt 0 ]; then
-                echo 'Vulnerabilities detected:'
-                gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
-                  --location='$ODS_LOCATION' \
-                  --format='table(vulnerability.effectiveSeverity, vulnerability.shortDescription)'
-                exit 1
-              fi
-            "
+          set -e
+          IMAGES=$(echo "$IMAGES_JSON" | jq -r '.[]')
+          for IMG in $IMAGES; do
+            echo "Scanning $IMG"
+            SCAN_ID=$(gcloud artifacts docker images scan "$IMG" \
+                        --location="$ODS_LOC" --remote --quiet \
+                        --format='value(response.scan)')
+            ROWS=$(gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
+                     --location="$ODS_LOC" --format='value(name)' | wc -l)
+            if [ "$ROWS" -gt 0 ]; then
+              echo "Vulnerabilities found in $IMG"
+              gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
+                --location="$ODS_LOC" \
+                --format='table(vulnerability.effectiveSeverity, vulnerability.shortDescription)'
+              exit 1
+            fi
+          done
 
 ###############################################################################
-# Job 3: Promote clean images to secure registry and GHCR
+# Job 3: Promote all images if scan job succeeded
 ###############################################################################
   promote_secure:
     needs: [build, ods_scan]
@@ -185,33 +172,45 @@ jobs:
     strategy:
       matrix:
         image: ${{ fromJson(needs.build.outputs.built_images) }}
+
     steps:
-    - uses: actions/checkout@v3
-    - uses: google-github-actions/auth@v1
-      with:
-        workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
-        service_account:            ${{ env.SERVICE_ACCOUNT }}
-    - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v1
-    - name: Configure Docker for GAR
-      run: |
-        gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
-        gcloud auth configure-docker
-    - name: Copy & retag clean image
-      run: |
-        SRC="${{ matrix.image }}"
-        DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" | sed "s/:insecure-/:secure-/")
-        docker pull $SRC
-        docker tag $SRC $DST
-        docker push $DST
-    - name: Push tag to GHCR
-      env:
-        REPO_NAME:  ${{ needs.build.outputs.repo_name }}
-        COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
-      run: |
-        SRC="${{ matrix.image }}"
-        COMPONENT=$(echo "$SRC" | sed -E 's/.*\/([^:]+):.*/\1/')
-        GHCR_IMG="ghcr.io/${{ github.repository_owner }}/$COMPONENT:secure-$COMMIT_TAG"
-        echo "${{ github.token }}" | docker login ghcr.io -u ${GITHUB_ACTOR} --password-stdin
-        docker tag "$SRC" "$GHCR_IMG"
-        docker push "$GHCR_IMG"
+      # Checkout for GHCR token context
+      - uses: actions/checkout@v3
+
+      # Authenticate to Google Cloud
+      - uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.SERVICE_ACCOUNT }}
+
+      # Install Cloud SDK and configure docker
+      - uses: google-github-actions/setup-gcloud@v1
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
+
+      # Copy digest to secure repo and tag
+      - id: promote
+        name: Copy and retag image in secure registry
+        env:
+          QUAR:   ${{ env.QUAR_IMAGE_REGISTRY }}
+          SECURE: ${{ env.SECURE_IMAGE_REGISTRY }}
+        run: |
+          SRC="${{ matrix.image }}"
+          DST=$(echo "$SRC" | sed "s|$QUAR|$SECURE|" | sed "s/:insecure-/:secure-/")
+          docker pull "$SRC"
+          docker tag  "$SRC" "$DST"
+          docker push "$DST"
+          echo "dst=$DST" >> "$GITHUB_OUTPUT"
+
+      # Push the secure tag to GHCR
+      - name: Push tag to GHCR
+        env:
+          COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
+          DST:        ${{ steps.promote.outputs.dst }}
+        run: |
+          COMPONENT=$(basename "$DST" | cut -d':' -f1)
+          GHCR="ghcr.io/${{ github.repository_owner }}/$COMPONENT:secure-$COMMIT_TAG"
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$DST" "$GHCR"
+          docker push "$GHCR"
