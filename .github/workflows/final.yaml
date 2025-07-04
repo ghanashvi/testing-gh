@@ -1,5 +1,5 @@
 ###############################################################################
-# Workflow: Build ➜ Scan ➜ Promote (parallel per Dockerfile)
+# Workflow: Build ➜ Scan ➜ Promote  (parallel per Dockerfile)
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -22,7 +22,7 @@ env:
   LOCATION:   us-central1            # Container Analysis location
 
 ###############################################################################
-# Job 1 : detect Dockerfiles that changed
+# Job 1 : detect changed Dockerfiles
 ###############################################################################
 jobs:
   detect_files:
@@ -35,18 +35,16 @@ jobs:
       repo_full:  ${{ github.event.client_payload.repository }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v3                # orchestration repo
 
-      # clone the application repo at the target commit
-      - id: clone
+      - id: clone                                # clone application repo
         run: |
           REPO="${{ github.event.client_payload.repository }}"
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO app
           cd app
           git checkout "${{ github.event.client_payload.sha }}"
 
-      # determine base commit
-      - id: base
+      - id: base                                 # resolve base commit
         run: |
           cd app
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
@@ -55,29 +53,29 @@ jobs:
             echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >>"$GITHUB_OUTPUT"
           fi
 
-      # list changed Dockerfiles
-      - id: changed
+      - id: changed                              # list changed Dockerfiles
         uses: tj-actions/changed-files@v46
         with:
           path:   app
           base_sha: ${{ steps.base.outputs.sha }}
           sha:      ${{ github.event.client_payload.sha }}
+          use_rest_api: false
           files: |
             **/Dockerfile*
 
-      # convert list to JSON array
+      # --- FIX: produce single‑line JSON array ------------------------------
       - id: collect
         run: |
           LIST="${{ steps.changed.outputs.all_changed_files }}"
           if [ -n "$LIST" ]; then
-            printf '%s\n' $LIST | jq -R . | jq -s > files.json   # ["file1","file2"]
+            FILES_JSON=$(printf '%s\n' $LIST | jq -Rcn '[inputs]')   # ["file1","file2"]
           else
-            echo '[]' > files.json
+            FILES_JSON='[]'
           fi
-          echo "files_json=$(cat files.json)" >>"$GITHUB_OUTPUT"
+          echo "files_json=$FILES_JSON" >>"$GITHUB_OUTPUT"
 
 ###############################################################################
-# Job 2 : build, scan, promote — one matrix run per file
+# Job 2 : build, scan, promote – one matrix run per Dockerfile
 ###############################################################################
   process_image:
     needs: detect_files
@@ -109,14 +107,13 @@ jobs:
       - name: Docker login (quarantine)
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      # clone the app repo for this runner
       - name: Checkout application repository
         run: |
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO_FULL app
           cd app
           git checkout "$COMMIT_SHA"
 
-      # Build & push image for this Dockerfile
+      # Build and push image for this Dockerfile
       - id: build
         env:
           FILE: ${{ matrix.file }}
@@ -131,7 +128,7 @@ jobs:
           docker push "$IMAGE"
           echo "image=$IMAGE" >>"$GITHUB_OUTPUT"
 
-      # Scan with vulnerabilitySummary (continue-on-error)
+      # Scan with vulnerabilitySummary
       - id: scan
         continue-on-error: true
         env:
@@ -139,8 +136,7 @@ jobs:
         run: |
           set -e
           TOKEN=$(gcloud auth print-access-token)
-          DIGEST=$(gcloud artifacts docker images describe "$IMAGE" \
-                     --format='value(image_summary.digest)')
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')
           BASE_NO_TAG=${IMAGE%%:*}
           RESOURCE_URL="https://${BASE_NO_TAG}@${DIGEST}"
           API="https://containeranalysis.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/occurrences:vulnerabilitySummary"
@@ -148,7 +144,7 @@ jobs:
             "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
           TOTAL=$(echo "$SUMMARY" | jq '[(.counts // [])[] .totalCount | tonumber] | add')
           if [ "$TOTAL" -gt 0 ]; then
-            echo "Vulnerabilities detected:"
+            echo "Vulnerabilities found:"
             echo "$SUMMARY" | jq '.counts'
             exit 1
           fi
@@ -183,7 +179,7 @@ jobs:
           docker tag "$DST" "$GHCR"
           docker push "$GHCR"
 
-      # Force this matrix run to fail when vulnerabilities found
-      - name: Fail run if scan failed
+      # Fail this matrix run when vulnerabilities exist
+      - name: Mark failure if scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
