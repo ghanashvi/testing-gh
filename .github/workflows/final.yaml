@@ -1,5 +1,5 @@
 ###############################################################################
-# Workflow: Build ➜ Scan ➜ Promote  (independent per Dockerfile)
+# Workflow: Build ➜ Scan ➜ Promote (parallel per Dockerfile)
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -19,10 +19,10 @@ env:
   GAR_LOCATION:          us-central1
 
   PROJECT_ID: axial-edition-463510-p5
-  LOCATION:   us-central1            # Container‑Analysis API region
+  LOCATION:   us-central1            # Container Analysis location
 
 ###############################################################################
-# Job 1 : Detect every changed Dockerfile          (quick, single runner)
+# Job 1 : detect Dockerfiles that changed
 ###############################################################################
 jobs:
   detect_files:
@@ -30,14 +30,14 @@ jobs:
     permissions: { contents: read }
 
     outputs:
-      files:      ${{ steps.changed.outputs.all }}
+      files_json: ${{ steps.collect.outputs.files_json }}
       commit_sha: ${{ github.event.client_payload.sha }}
       repo_full:  ${{ github.event.client_payload.repository }}
 
     steps:
-      - uses: actions/checkout@v3        # orchestration repo
+      - uses: actions/checkout@v3
 
-      # clone the app repo at the target SHA
+      # clone the application repo at the target commit
       - id: clone
         run: |
           REPO="${{ github.event.client_payload.repository }}"
@@ -45,7 +45,7 @@ jobs:
           cd app
           git checkout "${{ github.event.client_payload.sha }}"
 
-      # base SHA = previous commit if exists, else empty tree
+      # determine base commit
       - id: base
         run: |
           cd app
@@ -64,35 +64,40 @@ jobs:
           sha:      ${{ github.event.client_payload.sha }}
           files: |
             **/Dockerfile*
+
+      # convert list to JSON array
       - id: collect
         run: |
-          jq -Rsc 'split("\n")[:-1]' <<<"${{ steps.changed.outputs.all_changed_files }}" \
-            >files.json
-          echo "all=$(cat files.json)" >>"$GITHUB_OUTPUT"
+          LIST="${{ steps.changed.outputs.all_changed_files }}"
+          if [ -n "$LIST" ]; then
+            printf '%s\n' $LIST | jq -R . | jq -s > files.json   # ["file1","file2"]
+          else
+            echo '[]' > files.json
+          fi
+          echo "files_json=$(cat files.json)" >>"$GITHUB_OUTPUT"
 
 ###############################################################################
-# Job 2 : For each Dockerfile, build → scan → promote          (matrix)
+# Job 2 : build, scan, promote — one matrix run per file
 ###############################################################################
   process_image:
     needs: detect_files
-    if: needs.detect_files.outputs.files != '[]'
+    if: needs.detect_files.outputs.files_json != '[]'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       packages: write
     strategy:
-      fail-fast: false                 # allow parallel success even with failures
+      fail-fast: false
       matrix:
-        file: ${{ fromJson(needs.detect_files.outputs.files) }}
+        file: ${{ fromJson(needs.detect_files.outputs.files_json) }}
 
     env:
       COMMIT_SHA: ${{ needs.detect_files.outputs.commit_sha }}
       REPO_FULL:  ${{ needs.detect_files.outputs.repo_full }}
 
     steps:
-      - uses: actions/checkout@v3      # orchestration repo
+      - uses: actions/checkout@v3
 
-      # GCP auth (Workload‑Identity Federation)
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
@@ -104,16 +109,15 @@ jobs:
       - name: Docker login (quarantine)
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      # clone the same repo & checkout required commit
+      # clone the app repo for this runner
       - name: Checkout application repository
         run: |
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO_FULL app
           cd app
           git checkout "$COMMIT_SHA"
 
-      # Build and push the image for this Dockerfile
+      # Build & push image for this Dockerfile
       - id: build
-        name: Build & push
         env:
           FILE: ${{ matrix.file }}
         run: |
@@ -127,9 +131,8 @@ jobs:
           docker push "$IMAGE"
           echo "image=$IMAGE" >>"$GITHUB_OUTPUT"
 
-      # Scan with vulnerabilitySummary – continue‑on‑error so job continues
+      # Scan with vulnerabilitySummary (continue-on-error)
       - id: scan
-        name: Container‑Analysis scan
         continue-on-error: true
         env:
           IMAGE: ${{ steps.build.outputs.image }}
@@ -145,27 +148,26 @@ jobs:
             "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
           TOTAL=$(echo "$SUMMARY" | jq '[(.counts // [])[] .totalCount | tonumber] | add')
           if [ "$TOTAL" -gt 0 ]; then
-            echo "Vulnerabilities found:"
+            echo "Vulnerabilities detected:"
             echo "$SUMMARY" | jq '.counts'
             exit 1
           fi
-          echo "Image clean."
+          echo "scan_pass=true" >>"$GITHUB_OUTPUT"
 
-      # Promote only if scan step succeeded
+      # Promote only if scan passed
       - name: Docker login (secure)
         if: steps.scan.outcome == 'success'
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
       - id: promote
         if: steps.scan.outcome == 'success'
-        name: Copy to secure registry
         env:
           SRC: ${{ steps.build.outputs.image }}
         run: |
           DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" \
                              | sed "s/:insecure-/:secure-/")
           docker pull "$SRC"
-          docker tag  "$SRC" "$DST"
+          docker tag "$SRC" "$DST"
           docker push "$DST"
           echo "dst=$DST" >>"$GITHUB_OUTPUT"
 
@@ -181,7 +183,7 @@ jobs:
           docker tag "$DST" "$GHCR"
           docker push "$GHCR"
 
-      # Mark this matrix run failed when vulnerabilities exist
+      # Force this matrix run to fail when vulnerabilities found
       - name: Fail run if scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
