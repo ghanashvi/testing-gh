@@ -1,5 +1,7 @@
 ################################################################################
-# Workflow : Build ➜ On‑Demand Scan (fail on ANY vuln) ➜ Promote
+# Workflow  :  Build ➜ On‑Demand Scan (fail on ANY vulnerability) ➜ Promote
+# Purpose   :  Block every image that shows even LOW‑level CVEs before it
+#              reaches the secure Artifact Registry repo or GHCR.
 ################################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -8,7 +10,7 @@ on:
     types: [app-code-change]
 
 ###############################################################################
-# ------------------------------  Global ENV  ---------------------------------
+# -------------------------------  Global ENV  --------------------------------
 ###############################################################################
 env:
   WORKLOAD_IDENTITY_PROVIDER: 'projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
@@ -16,14 +18,14 @@ env:
 
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
-  GAR_LOCATION:          us-central1
-  ODS_LOCATION:          us
+  GAR_LOCATION:          us-central1          # region for docker login
+  ODS_LOCATION:          us                  # On‑Demand Scan region
 
-  POLL_INTERVAL: 10
-  MAX_ATTEMPTS:  36
+  POLL_INTERVAL: 10      # seconds between scan‑polls
+  MAX_ATTEMPTS:  36      # 36 × 10 s  ≈ 6 minutes
 
 ###############################################################################
-# JOB 1 : Build & push changed Dockerfiles to *quarantine*
+# JOB 1 ─ Build & push only changed Dockerfiles to the *quarantine* repo
 ###############################################################################
 jobs:
   build:
@@ -36,8 +38,10 @@ jobs:
       commit_tag:   ${{ github.event.client_payload.sha }}
 
     steps:
+      # 1 Checkout orchestration repo (this repo)
       - uses: actions/checkout@v3
 
+      # 2 Clone the application repo at the commit that triggered dispatch
       - name: Clone Source Repository
         id: clone_repo
         run: |
@@ -48,6 +52,7 @@ jobs:
           git checkout "${{ github.event.client_payload.sha }}"
           echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_OUTPUT"
 
+      # 3 Figure out a base commit (empty tree on very first run) for diff
       - id: base
         name: Resolve base SHA
         run: |
@@ -58,6 +63,7 @@ jobs:
             echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >> "$GITHUB_OUTPUT"
           fi
 
+      # 4 List Dockerfiles that changed in this commit range
       - id: diff
         name: Detect changed Dockerfiles
         uses: tj-actions/changed-files@v46
@@ -70,16 +76,18 @@ jobs:
           files: |
             **/Dockerfile*
 
+      # 5 Google Cloud auth – Workload‑Identity Federation (creates creds file)
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
+      # 6 Enable Buildx builder & log in to Artifact Registry
       - uses: docker/setup-buildx-action@v2
-
       - name: Configure Docker for GAR
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
+      # 7 Build & push each changed Dockerfile as insecure‑<commitSHA>
       - name: Build & Push images
         run: |
           set -e
@@ -94,12 +102,14 @@ jobs:
             COMP=${COMP:-default}
             TAG="$REPO-$COMP:insecure-$SHA"
             FULL="$QUAR_IMAGE_REGISTRY/$TAG"
+            echo "::group::Building $FULL"
             docker build -f "$FILE" -t "$FULL" "$DIR"
             docker push "$FULL"
+            echo "::endgroup::"
             echo "$FULL" >> /tmp/built.txt
           done
 
-      # 🔧 FIX: added the closing `fi`
+      # 8 Convert image list → JSON for matrix in next jobs   🔧 *fi added*
       - id: collect
         name: Collect built images
         run: |
@@ -111,7 +121,7 @@ jobs:
           fi
 
 ###############################################################################
-# JOB 2 : On‑Demand Scan (block on ANY vuln)
+# JOB 2 ─ On‑Demand Scan – fail on *any* vulnerability row
 ###############################################################################
   ods_scan:
     needs: build
@@ -123,47 +133,56 @@ jobs:
         image: ${{ fromJson(needs.build.outputs.built_images) }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v3   # workspace for creds file mount
 
+      # 1 Authenticate (creates JSON creds in workspace)
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      - name: ODS scan & gate
+      # 2 Install *local‑extract* CLI component once (APT path)
+      - name: Install local‑extract component
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y google-cloud-cli-local-extract
+
+      # 3 Trigger remote ODS scan & fail when any row appears
+      - name: Run ODS scan & gate
         env:
           IMG:            ${{ matrix.image }}
           ODS_LOCATION:   ${{ env.ODS_LOCATION }}
           POLL_INTERVAL:  ${{ env.POLL_INTERVAL }}
           MAX_ATTEMPTS:   ${{ env.MAX_ATTEMPTS }}
-          CREDS:          ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
         run: |
-          docker run --rm \
-            -e CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
-            -e GOOGLE_APPLICATION_CREDENTIALS=/creds.json \
-            -v "$CREDS":/creds.json:ro \
-            google/cloud-sdk:latest /bin/bash -c "
-              set -e
-              SCAN_ID=\$(gcloud artifacts docker images scan \"$IMG\" \
-                          --location='$ODS_LOCATION' --quiet \
-                          --remote \
-                          --format='value(response.scan)')
-              for i in \$(seq 1 $MAX_ATTEMPTS); do
-                ROWS=\$(gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
-                         --location='$ODS_LOCATION' \
-                         --format='value(name)' | wc -l)
-                if [ \"\$ROWS\" -gt 0 ]; then
-                  gcloud artifacts docker images list-vulnerabilities \$SCAN_ID \
-                    --location='$ODS_LOCATION' \
-                    --format='table(vulnerability.effectiveSeverity, vulnerability.shortDescription)'
-                  exit 1
-                fi
-                sleep $POLL_INTERVAL
-              done
-            "
+          set -e
+          echo "🔍  On‑Demand scan for $IMG"
+          SCAN_ID=$(gcloud artifacts docker images scan "$IMG" \
+                      --location="$ODS_LOCATION" \
+                      --remote \
+                      --quiet \
+                      --format='value(response.scan)')
+          echo "Scan ID: $SCAN_ID"
+
+          for i in $(seq 1 "$MAX_ATTEMPTS"); do
+            ROWS=$(gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
+                     --location="$ODS_LOCATION" \
+                     --format='value(name)' | wc -l)
+            if [ "$ROWS" -gt 0 ]; then
+              echo "❌  Vulnerabilities detected (rows=$ROWS)"
+              gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
+                --location="$ODS_LOCATION" \
+                --format='table(vulnerability.effectiveSeverity, vulnerability.shortDescription)'
+              exit 1
+            fi
+            echo "⏳  Waiting for results ($i/$MAX_ATTEMPTS)…"
+            sleep "$POLL_INTERVAL"
+          done
+
+          echo "✅  No vulnerabilities found"
 
 ###############################################################################
-# JOB 3 : Promote (runs only if ods_scan succeeded)
+# JOB 3 ─ Promote clean images to secure repo + GHCR
 ###############################################################################
   promote_secure:
     needs: [build, ods_scan]
@@ -181,11 +200,11 @@ jobs:
           service_account:            ${{ env.SERVICE_ACCOUNT }}
           create_credentials_file:    false
 
-      - name: Docker login (secure repo)
+      - name: Docker login (secure repo host)
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
       - id: copy
-        name: Copy & tag secure
+        name: Copy digest to secure repo
         run: |
           SRC="${{ matrix.image }}"
           DST=$(echo "$SRC" \
@@ -194,7 +213,7 @@ jobs:
           gcloud artifacts docker images copy "$SRC" --destination="$DST" --quiet
           echo "dst=$DST" >> "$GITHUB_OUTPUT"
 
-      - name: Push to GHCR
+      - name: Push same digest/tag to GHCR
         env:
           COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
           DST:        ${{ steps.copy.outputs.dst }}
