@@ -1,5 +1,5 @@
 ###############################################################################
-# Workflow: Build ➜ Scan ➜ Promote  (parallel per Dockerfile)
+# Workflow: Build ➜ Scan ➜ Promote   (one matrix run per Dockerfile)
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -19,10 +19,10 @@ env:
   GAR_LOCATION:          us-central1
 
   PROJECT_ID: axial-edition-463510-p5
-  LOCATION:   us-central1            # Container Analysis location
+  LOCATION:   us-central1            # Container‑Analysis region
 
 ###############################################################################
-# Job 1 : detect changed Dockerfiles
+# Job 1 : detect every changed Dockerfile
 ###############################################################################
 jobs:
   detect_files:
@@ -35,16 +35,15 @@ jobs:
       repo_full:  ${{ github.event.client_payload.repository }}
 
     steps:
-      - uses: actions/checkout@v3                # orchestration repo
+      - uses: actions/checkout@v3                        # orchestration repo
 
-      - id: clone                                # clone application repo
+      - id: clone                                        # clone app repo
         run: |
-          REPO="${{ github.event.client_payload.repository }}"
-          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/$REPO app
+          git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }} app
           cd app
           git checkout "${{ github.event.client_payload.sha }}"
 
-      - id: base                                 # resolve base commit
+      - id: base                                         # resolve base SHA
         run: |
           cd app
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
@@ -53,7 +52,7 @@ jobs:
             echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >>"$GITHUB_OUTPUT"
           fi
 
-      - id: changed                              # list changed Dockerfiles
+      - id: changed                                      # list changed Dockerfiles
         uses: tj-actions/changed-files@v46
         with:
           path:   app
@@ -63,19 +62,17 @@ jobs:
           files: |
             **/Dockerfile*
 
-      # --- FIX: produce single‑line JSON array ------------------------------
+      # --- FIX: create single‑line JSON array with ALL paths -------------
       - id: collect
         run: |
-          LIST="${{ steps.changed.outputs.all_changed_files }}"
-          if [ -n "$LIST" ]; then
-            FILES_JSON=$(printf '%s\n' $LIST | jq -Rcn '[inputs]')   # ["file1","file2"]
-          else
-            FILES_JSON='[]'
-          fi
-          echo "files_json=$FILES_JSON" >>"$GITHUB_OUTPUT"
+          echo 'Changed files list:'
+          echo "${{ steps.changed.outputs.all_changed_files }}"
+          JSON=$(echo -n "${{ steps.changed.outputs.all_changed_files }}" \
+                   | jq -Rs -c 'split("\n") | map(select(length>0))')
+          echo "files_json=$JSON" >>"$GITHUB_OUTPUT"
 
 ###############################################################################
-# Job 2 : build, scan, promote – one matrix run per Dockerfile
+# Job 2 : build, scan, promote  (matrix over Dockerfile paths)
 ###############################################################################
   process_image:
     needs: detect_files
@@ -85,7 +82,7 @@ jobs:
       id-token: write
       packages: write
     strategy:
-      fail-fast: false
+      fail-fast: false                                   # allow parallel success
       matrix:
         file: ${{ fromJson(needs.detect_files.outputs.files_json) }}
 
@@ -113,7 +110,7 @@ jobs:
           cd app
           git checkout "$COMMIT_SHA"
 
-      # Build and push image for this Dockerfile
+      # Build & push image for this Dockerfile
       - id: build
         env:
           FILE: ${{ matrix.file }}
@@ -124,11 +121,12 @@ jobs:
           COMP=$(basename "$FILE" | sed -E 's/^Dockerfile[-\.]?//')
           COMP=${COMP:-default}
           IMAGE="${{ env.QUAR_IMAGE_REGISTRY }}/$(basename "$(pwd)")-$COMP:insecure-$COMMIT_SHA"
+          echo "Building $IMAGE from $FILE"
           docker build -f "$FILE" -t "$IMAGE" "$DIR"
           docker push "$IMAGE"
           echo "image=$IMAGE" >>"$GITHUB_OUTPUT"
 
-      # Scan with vulnerabilitySummary
+      # Scan with vulnerabilitySummary REST API
       - id: scan
         continue-on-error: true
         env:
@@ -144,13 +142,13 @@ jobs:
             "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
           TOTAL=$(echo "$SUMMARY" | jq '[(.counts // [])[] .totalCount | tonumber] | add')
           if [ "$TOTAL" -gt 0 ]; then
-            echo "Vulnerabilities found:"
+            echo "Vulnerabilities detected:"
             echo "$SUMMARY" | jq '.counts'
             exit 1
           fi
           echo "scan_pass=true" >>"$GITHUB_OUTPUT"
 
-      # Promote only if scan passed
+      # Promote to secure GAR when clean
       - name: Docker login (secure)
         if: steps.scan.outcome == 'success'
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
@@ -160,13 +158,15 @@ jobs:
         env:
           SRC: ${{ steps.build.outputs.image }}
         run: |
-          DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" \
-                             | sed "s/:insecure-/:secure-/")
+          DST=$(echo "$SRC" | \
+                 sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" | \
+                 sed "s/:insecure-/:secure-/")
           docker pull "$SRC"
-          docker tag "$SRC" "$DST"
+          docker tag  "$SRC" "$DST"
           docker push "$DST"
           echo "dst=$DST" >>"$GITHUB_OUTPUT"
 
+      # Push the same digest/tag to GHCR
       - name: Push to GHCR
         if: steps.scan.outcome == 'success'
         env:
@@ -179,7 +179,7 @@ jobs:
           docker tag "$DST" "$GHCR"
           docker push "$GHCR"
 
-      # Fail this matrix run when vulnerabilities exist
-      - name: Mark failure if scan failed
+      # Fail only this matrix run if vulnerabilities were found
+      - name: Fail this run on vulnerabilities
         if: steps.scan.outcome == 'failure'
         run: exit 1
