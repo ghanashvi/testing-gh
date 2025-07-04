@@ -1,5 +1,5 @@
 ###############################################################################
-# Workflow: Build ➜ Container‑Analysis Scan ➜ Promote (per Dockerfile)
+# Workflow : Build ➜ Container‑Analysis Scan ➜ Promote
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -7,9 +7,6 @@ on:
   repository_dispatch:
     types: [app-code-change]
 
-###############################################################################
-# Global environment (shared by all jobs)
-###############################################################################
 env:
   WORKLOAD_IDENTITY_PROVIDER: projects/906017862008/locations/global/workloadIdentityPools/github-pool/providers/github-provider
   SERVICE_ACCOUNT:            ci-image-builder@axial-edition-463510-p5.iam.gserviceaccount.com
@@ -22,7 +19,7 @@ env:
   LOCATION:   us-central1            # Container‑Analysis region
 
 ###############################################################################
-# Job 1 ─ build every changed Dockerfile and output images_json
+# Job 1 : build every changed Dockerfile
 ###############################################################################
 jobs:
   build:
@@ -34,19 +31,16 @@ jobs:
       commit_sha:  ${{ github.event.client_payload.sha }}
 
     steps:
-      # Checkout orchestration repo
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v3                          # orchestration repo
 
       # Clone application repo
       - id: clone
-        name: Clone app repo
         run: |
           git clone https://x-access-token:${{ secrets.CI_PAT }}@github.com/${{ github.event.client_payload.repository }} app
           cd app
           git checkout "${{ github.event.client_payload.sha }}"
-          echo "APP_DIR=app" >>"$GITHUB_ENV"
 
-      # Resolve base commit (previous or empty tree)
+      # Base commit
       - id: base
         run: |
           cd app
@@ -56,7 +50,7 @@ jobs:
             echo "sha=4b825dc642cb6eb9a060e54bf8d69288fbee4904" >>"$GITHUB_OUTPUT"
           fi
 
-      # Detect changed Dockerfiles (newline separator)
+      # Detect Dockerfiles (JSON output)
       - id: diff
         uses: tj-actions/changed-files@v46
         with:
@@ -65,31 +59,30 @@ jobs:
           base_sha: ${{ steps.base.outputs.sha }}
           sha:      ${{ github.event.client_payload.sha }}
           use_rest_api: false
-          separator: "\n"
+          json: true
           files: |
             **/Dockerfile*
 
-      # Authenticate to Google Cloud
+      # Auth & Docker setup
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
-
       - uses: docker/setup-buildx-action@v2
       - uses: google-github-actions/setup-gcloud@v1
+      - run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      - name: Docker login (quarantine)
-        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
-
-      # Build & push every changed Dockerfile
-      - name: Build & push images
+      # ---------- Build & push (iterate via JSON) ------------------------
+      - id: buildpush
         run: |
           set -e
-          SHA="${{ github.event.commit_sha || github.event.client_payload.sha }}"
-          cd "$APP_DIR"
+          SHA="${{ github.event.client_payload.sha }}"
+          cd app
+          echo '${{ steps.diff.outputs.all_changed_files_json }}' | \
+            jq -r '.[]' > /tmp/dflist.txt
+
           : > /tmp/images.txt
-          for DF in ${{ steps.diff.outputs.all_changed_files }}; do
-            [ -z "$DF" ] && continue
+          for DF in $(cat /tmp/dflist.txt); do
             DIR=$(dirname "$DF")
             COMP=$(basename "$DF" | sed -E 's/^Dockerfile[-\.]?//')
             COMP=${COMP:-default}
@@ -99,18 +92,14 @@ jobs:
             echo "$IMAGE" >> /tmp/images.txt
           done
 
-      # Collect built images into JSON
+      # Collect images JSON
       - id: collect
         run: |
-          if [ -s /tmp/images.txt ]; then
-            jq -Rsc 'split("\n")[:-1]' /tmp/images.txt >images.json
-            echo "images_json=$(cat images.json)" >>"$GITHUB_OUTPUT"
-          else
-            echo "images_json=[]" >>"$GITHUB_OUTPUT"
-          fi
+          jq -Rsc 'split("\n")[:-1]' /tmp/images.txt >images.json
+          echo "images_json=$(cat images.json)" >>"$GITHUB_OUTPUT"
 
 ###############################################################################
-# Job 2 ─ scan then promote (matrix: one runner per image)
+# Job 2 : scan & promote (matrix per image) – unchanged from previous version
 ###############################################################################
   scan_and_promote:
     needs: build
@@ -130,24 +119,18 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # GCP auth
       - uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
-
       - uses: google-github-actions/setup-gcloud@v1
       - uses: docker/setup-buildx-action@v2
+      - run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      - name: Docker login (quarantine)
-        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
-
-      # -------- Scan --------
+      # -- scan -----------------------------------------------------------
       - id: scan
-        name: Scan with Container‑Analysis
         continue-on-error: true
-        env:
-          IMAGE: ${{ matrix.image }}
+        env: { IMAGE: ${{ matrix.image }} }
         run: |
           TOKEN=$(gcloud auth print-access-token)
           DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')
@@ -156,43 +139,29 @@ jobs:
           SUMMARY=$(curl -s -H "Authorization: Bearer $TOKEN" \
             "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
           TOTAL=$(echo "$SUMMARY" | jq '[(.counts // [])[] .totalCount | tonumber] | add')
-          if [ "$TOTAL" -gt 0 ]; then
-            echo "❌ vulnerabilities in $IMAGE"
-            echo "$SUMMARY" | jq '.counts'
-            exit 1
-          fi
-          echo "clean=true" >>"$GITHUB_OUTPUT"
+          [ "$TOTAL" -eq 0 ] && echo "clean=true" >>"$GITHUB_OUTPUT" || { echo "$SUMMARY"|jq '.counts'; exit 1; }
 
-      # -------- Promote (only if clean) --------
-      - name: Docker login (secure)
-        if: steps.scan.outcome == 'success'
+      # -- promote if clean ----------------------------------------------
+      - if: steps.scan.outcome == 'success'
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
       - id: promote
         if: steps.scan.outcome == 'success'
-        env:
-          SRC: ${{ matrix.image }}
+        env: { SRC: ${{ matrix.image }} }
         run: |
-          DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" \
-                             | sed "s/:insecure-/:secure-/")
-          docker pull "$SRC"
-          docker tag "$SRC" "$DST"
-          docker push "$DST"
+          DST=$(echo "$SRC" | sed "s|$QUAR_IMAGE_REGISTRY|$SECURE_IMAGE_REGISTRY|" | sed "s/:insecure-/:secure-/")
+          docker pull "$SRC"; docker tag "$SRC" "$DST"; docker push "$DST"
           echo "dst=$DST" >>"$GITHUB_OUTPUT"
 
       - name: Push to GHCR
         if: steps.scan.outcome == 'success'
-        env:
-          DST: ${{ steps.promote.outputs.dst }}
-          SHA: ${{ env.SHA }}
+        env: { DST: ${{ steps.promote.outputs.dst }}, SHA: ${{ env.SHA }} }
         run: |
           NAME=$(basename "$DST" | cut -d':' -f1)
           GHCR="ghcr.io/${{ github.repository_owner }}/$NAME:secure-$SHA"
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag "$DST" "$GHCR"
-          docker push "$GHCR"
+          docker tag "$DST" "$GHCR"; docker push "$GHCR"
 
-      # Mark this matrix run failed when scan failed
-      - name: Fail runner if scan failed
+      - name: Fail run if scan failed
         if: steps.scan.outcome == 'failure'
         run: exit 1
