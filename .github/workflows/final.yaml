@@ -1,5 +1,6 @@
 ###############################################################################
-# Workflow: Build ➜ On‑Demand Scan (block on ANY vulnerability) ➜ Promote
+# Workflow: Build ➜ Container‑Analysis Scan ➜ Promote
+# Goal     : Push only images with zero vulnerabilities to the secure registry
 ###############################################################################
 name: Build ➜ Scan ➜ Promote
 
@@ -17,7 +18,8 @@ env:
   QUAR_IMAGE_REGISTRY:   us-central1-docker.pkg.dev/axial-edition-463510-p5/quarantine-repo
   SECURE_IMAGE_REGISTRY: us-central1-docker.pkg.dev/decent-creek-464109-p6/secure-repo
   GAR_LOCATION:          us-central1
-  ODS_LOCATION:          us
+  PROJECT_ID:            axial-edition-463510-p5        # used by REST call
+  REGION:                us-central1                    # registry / API region
 
 ###############################################################################
 # Job 1: Build and push changed Dockerfiles to the quarantine registry
@@ -104,7 +106,7 @@ jobs:
             echo "$FULL" >> /tmp/built.txt
           done
 
-      # Collect built image list (fi added to close the if‑block)
+      # Collect list of built images for next job
       - id: collect
         name: Collect built image list
         run: |
@@ -116,17 +118,16 @@ jobs:
           fi
 
 ###############################################################################
-# Job 2: On‑Demand scan — fails if any image has vulnerabilities
+# Job 2: Scan images with Container‑Analysis vulnerabilitySummary API
 ###############################################################################
-  ods_scan:
+  ca_scan:
     needs: build
     if: needs.build.outputs.built_images != '[]'
     runs-on: ubuntu-latest
     permissions: { id-token: write }
 
-    # Entire job fails on the first non‑zero exit of any step
     steps:
-      # Checkout so credentials file can be created
+      # Checkout for workspace
       - uses: actions/checkout@v3
 
       # Authenticate to Google Cloud
@@ -135,36 +136,46 @@ jobs:
           workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
           service_account:            ${{ env.SERVICE_ACCOUNT }}
 
-      # Scan all images in one shell, fail immediately on first vuln
-      - name: Scan all images
+      # Scan every image; fail on the first vulnerability
+      - name: Scan images via vulnerabilitySummary API
         env:
           IMAGES_JSON: ${{ needs.build.outputs.built_images }}
-          ODS_LOC:     ${{ env.ODS_LOCATION }}
+          PROJ:        ${{ env.PROJECT_ID }}
+          REGION:      ${{ env.REGION }}
         run: |
           set -e
-          IMAGES=$(echo "$IMAGES_JSON" | jq -r '.[]')
-          for IMG in $IMAGES; do
-            echo "Scanning $IMG"
-            SCAN_ID=$(gcloud artifacts docker images scan "$IMG" \
-                        --location="$ODS_LOC" --remote --quiet \
-                        --format='value(response.scan)')
-            ROWS=$(gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
-                     --location="$ODS_LOC" --format='value(name)' | wc -l)
-            if [ "$ROWS" -gt 0 ]; then
+          TOKEN=$(gcloud auth print-access-token)
+
+          for IMG in $(echo "$IMAGES_JSON" | jq -r '.[]'); do
+            echo "Checking $IMG"
+
+            # Obtain image digest from registry metadata
+            DIGEST=$(gcloud artifacts docker images describe "$IMG" \
+                       --format='value(image_summary.digest)')
+
+            # Build resource URL for the API call
+            RESOURCE="$REGION-docker.pkg.dev/$PROJ/quarantine-repo/${IMG##*/}@$DIGEST"
+
+            # Query vulnerabilitySummary endpoint
+            SUMMARY=$(curl -s -H "Authorization: Bearer $TOKEN" \
+              "https://containeranalysis.googleapis.com/v1/projects/$PROJ/occurrences:vulnerabilitySummary\
+?filter=resourceUrl=\"$RESOURCE\"&returnPartialSuccess=true")
+
+            TOTAL=$(echo "$SUMMARY" | jq '[.severityCount[].count | tonumber] | add')
+
+            if [ "$TOTAL" -gt 0 ]; then
               echo "Vulnerabilities found in $IMG"
-              gcloud artifacts docker images list-vulnerabilities "$SCAN_ID" \
-                --location="$ODS_LOC" \
-                --format='table(vulnerability.effectiveSeverity, vulnerability.shortDescription)'
+              echo "$SUMMARY" | jq '.severityCount'
               exit 1
             fi
           done
 
 ###############################################################################
-# Job 3: Promote all images if scan job succeeded
+# Job 3: Promote all images if the scan job succeeded
 ###############################################################################
   promote_secure:
-    needs: [build, ods_scan]
-    if: needs.ods_scan.result == 'success'
+    needs: [build, ca_scan]
+    if: needs.ca_scan.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -174,7 +185,7 @@ jobs:
         image: ${{ fromJson(needs.build.outputs.built_images) }}
 
     steps:
-      # Checkout for GHCR token context
+      # Checkout for GHCR context
       - uses: actions/checkout@v3
 
       # Authenticate to Google Cloud
@@ -189,7 +200,7 @@ jobs:
       - name: Configure docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
 
-      # Copy digest to secure repo and tag
+      # Copy digest to secure repo
       - id: promote
         name: Copy and retag image in secure registry
         env:
@@ -197,13 +208,15 @@ jobs:
           SECURE: ${{ env.SECURE_IMAGE_REGISTRY }}
         run: |
           SRC="${{ matrix.image }}"
-          DST=$(echo "$SRC" | sed "s|$QUAR|$SECURE|" | sed "s/:insecure-/:secure-/")
+          DST=$(echo "$SRC" \
+                 | sed "s|$QUAR|$SECURE|" \
+                 | sed "s/:insecure-/:secure-/")
           docker pull "$SRC"
           docker tag  "$SRC" "$DST"
           docker push "$DST"
           echo "dst=$DST" >> "$GITHUB_OUTPUT"
 
-      # Push the secure tag to GHCR
+      # Push secure tag to GHCR
       - name: Push tag to GHCR
         env:
           COMMIT_TAG: ${{ needs.build.outputs.commit_tag }}
