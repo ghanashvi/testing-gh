@@ -160,7 +160,7 @@ jobs:
             fi
 
             RESOURCE_URL="https://${IMG%%:*}@${DIGEST}"
-            API="https//:containeranalysis.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/occurrences:vulnerabilitySummary"
+            API="https://containeranalysis.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/occurrences:vulnerabilitySummary"
 
             SUMMARY=$(curl -s -H "Authorization: Bearer $TOKEN" \
               "${API}?filter=resourceUrl=\"${RESOURCE_URL}\"&returnPartialSuccess=true")
