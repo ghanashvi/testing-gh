@@ -165,6 +165,7 @@ jobs:
               exit 1
             fi
             echo "No vulnerabilities in $IMG"
+          done
 
 ###############################################################################
 # Job 3: Promote images if the scan job succeeded
