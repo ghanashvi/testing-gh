@@ -88,22 +88,36 @@ jobs:
 
       # Build and push each changed Dockerfile
       - name: Build and push images
+        env:
+          CHANGED_FILES: ${{ steps.diff.outputs.all_changed_files }}
         run: |
           set -e
           REPO="${{ steps.clone_repo.outputs.REPO_NAME }}"
           SHA="${{ github.event.client_payload.sha }}"
           cd "$REPO"
+
+          # Convert the multiline GitHub output into an array that preserves spaces/newlines
+          IFS=$'\n' read -rd '' -a FILES <<< "$CHANGED_FILES"
+
           > /tmp/built.txt
-          for FILE in ${{ steps.diff.outputs.all_changed_files }}; do
-            [[ "$FILE" != *Dockerfile* ]] && continue
+          for ORIGINAL in "${FILES[@]}"; do
+            [[ "$ORIGINAL" != *Dockerfile* ]] && continue
+
+            # Strip the leading "<repo>/" if present so paths resolve after cd
+            FILE="${ORIGINAL#${REPO}/}"
+
             DIR=$(dirname "$FILE")
             COMP=$(basename "$FILE" | sed -E 's/^Dockerfile[-\.]?//')
             COMP=${COMP:-default}
+
             TAG="$REPO-$COMP:insecure-$SHA"
             FULL="$QUAR_IMAGE_REGISTRY/$TAG"
+
+            echo "⏳ Building $FULL from $FILE (context: $DIR)"
             docker build -f "$FILE" -t "$FULL" "$DIR"
             docker push "$FULL"
             echo "$FULL" >> /tmp/built.txt
+            echo "✅ Pushed $FULL"
           done
 
       # Collect list of built images
