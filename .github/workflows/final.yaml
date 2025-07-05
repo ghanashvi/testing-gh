@@ -99,7 +99,9 @@ jobs:
             DIR=$(dirname "$FILE")
             COMP=$(basename "$FILE" | sed -E 's/^Dockerfile[-\.]?//')
             COMP=${COMP:-default}
-            TAG="$REPO-$COMP:insecure-$SHA"
+            REPO_LC=${REPO,,}        # bash parameter‑expansion to lowercase
+            COMP_LC=${COMP,,}
+            TAG="$REPO_LC-$COMP_LC:insecure-$SHA"
             FULL="$QUAR_IMAGE_REGISTRY/$TAG"
             docker build -f "$FILE" -t "$FULL" "$DIR"
             docker push "$FULL"
