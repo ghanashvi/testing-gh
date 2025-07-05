@@ -115,6 +115,7 @@ jobs:
             echo "images_json=$(cat /tmp/list.json)" >> "$GITHUB_OUTPUT"
           else
             echo "images_json=[]" >> "$GITHUB_OUTPUT"
+          fi
 
 ###############################################################################
 # Job 2: Scan images using vulnerabilitySummary REST API
